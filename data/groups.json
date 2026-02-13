@@ -1,0 +1,120 @@
+{
+  "groups": [
+    {
+      "id": "grp-1770916955820",
+      "name": "Grupo 1770916955820",
+      "passwordHash": "076422c329486a838da8342d225c449d:5abe1728305371274bb1cea0ffc1e16372ee541ac8f10a474a4843a8f620135d9f25cd9c6e383ce34600297eb8b17928f426b01fb58770563e11b24b5942dc8a",
+      "createdBy": "dced50e2-01ab-4a2f-ac26-2ce232a344c5",
+      "createdAt": "2026-02-12T17:22:37.818Z"
+    },
+    {
+      "id": "grp-1770916980397",
+      "name": "Grupo 1770916980397",
+      "passwordHash": "19e25fd8fef1d87afbd1a7d9d47db9ab:21a237697a90f083d8326279c49e4e5ee68b6f80506d3ddb624df789dd5ad8e2e23360da368b744edb8a1873c281a330eff4886ee9e5b0d080316a4160e56c74",
+      "createdBy": "519dc170-6e4b-4114-ac52-5d4eb7b0c540",
+      "createdAt": "2026-02-12T17:23:02.529Z"
+    },
+    {
+      "id": "grp-1770916999406",
+      "name": "Grupo 1770916999406",
+      "passwordHash": "e3035419c247575a0a96bd4b8a2be7f2:563bb513089bff647640abd1fc9464d5237add93bf3401bf1490501f71207fe8b8ea9341f4401b3e06d24554bc2acc6c1ee12d010bdfaf7fc47275d009f55639",
+      "createdBy": "97e36822-473f-4563-8eb8-b0a8459b0795",
+      "createdAt": "2026-02-12T17:23:19.829Z"
+    },
+    {
+      "id": "grp-1770917029597",
+      "name": "Grupo 1770917029597",
+      "passwordHash": "74784f1ca8784c89235b66b92b489dbd:f734d7ace4a4c305957c2be8d7d2928d1949f8736110661694d239b687cb5c4af807f02b70bf2985b62228c988991394f984c3eb66898961ecdfe78b4ebb9af3",
+      "createdBy": "edbdddc1-8d35-40fa-a084-42b09e92b1c9",
+      "createdAt": "2026-02-12T17:23:51.447Z"
+    },
+    {
+      "id": "grp-1770917067406-348724",
+      "name": "Grupo 1770917067406 348724",
+      "passwordHash": "e9f63547b87733cc3d221d342a8ccb3e:ddeb9bb9c8c3761e7c8a126d108b4a769dc41a3590a893e19ea2559d2da0d22ffe2b433301de9de19afdb028806b17716a568a9b65d15523fc5cc3cace1bc88d",
+      "createdBy": "1b9a26bd-5437-4562-939c-6de741edbe7d",
+      "createdAt": "2026-02-12T17:24:29.025Z"
+    },
+    {
+      "id": "1",
+      "name": "Juventud",
+      "passwordHash": "63ee59966d55f626b061a28fef448b80:b63a51b9d12f882307c38e39a945d24ac3ed69f29b8d84f81d3c6f88b6e74fef878b6c65cdad5d92da0718b337ccc557d42d7a1fb42adef27b83b2076cbcf176",
+      "createdBy": "082767a3-3b04-4885-a6fc-68fa1c120099",
+      "createdAt": "2026-02-12T17:25:33.994Z"
+    },
+    {
+      "id": "2",
+      "name": "JuventudSHA",
+      "passwordHash": "b2ec790b5833cb288c2f59fabe2d12b0:8a7fabcacb04aea26e1ccd0c392d690c8037f04493ce54ce55a396330cf0c57f05860d4ca81df27fbe839d47162944b5c9905a5c39e28caee54de01932aa0033",
+      "createdBy": "082767a3-3b04-4885-a6fc-68fa1c120099",
+      "createdAt": "2026-02-12T17:25:46.268Z"
+    },
+    {
+      "id": "10",
+      "name": "JuventudHebraica",
+      "passwordHash": "d3767f317c2202456795d99462ebe2a5:58281e7025793ab249368cdbec5d47df65a8e93e79e7785faa9988329843fbc8c41f25fd11ebd2c1be5dfd097218467742f8f4b2ab32e60b8ef22ee967b2fc40",
+      "createdBy": "8b849786-53d1-414d-8a1d-60b5e668ed88",
+      "createdAt": "2026-02-12T17:54:19.774Z"
+    }
+  ],
+  "staffMemberships": [
+    {
+      "userId": "dced50e2-01ab-4a2f-ac26-2ce232a344c5",
+      "role": "admin",
+      "groupId": "grp-1770916955820",
+      "updatedAt": "2026-02-12T17:22:37.827Z"
+    },
+    {
+      "userId": "519dc170-6e4b-4114-ac52-5d4eb7b0c540",
+      "role": "admin",
+      "groupId": "grp-1770916980397",
+      "updatedAt": "2026-02-12T17:23:02.534Z"
+    },
+    {
+      "userId": "97e36822-473f-4563-8eb8-b0a8459b0795",
+      "role": "admin",
+      "groupId": "grp-1770916999406",
+      "updatedAt": "2026-02-12T17:23:19.833Z"
+    },
+    {
+      "userId": "edbdddc1-8d35-40fa-a084-42b09e92b1c9",
+      "role": "admin",
+      "groupId": "grp-1770917029597",
+      "updatedAt": "2026-02-12T17:23:51.453Z"
+    },
+    {
+      "userId": "1b9a26bd-5437-4562-939c-6de741edbe7d",
+      "role": "admin",
+      "groupId": "grp-1770917067406-348724",
+      "updatedAt": "2026-02-12T17:24:29.030Z"
+    },
+    {
+      "userId": "082767a3-3b04-4885-a6fc-68fa1c120099",
+      "role": "admin",
+      "groupId": "2",
+      "updatedAt": "2026-02-12T17:25:46.275Z"
+    },
+    {
+      "userId": "8b849786-53d1-414d-8a1d-60b5e668ed88",
+      "role": "admin",
+      "groupId": "10",
+      "updatedAt": "2026-02-12T17:54:19.781Z"
+    },
+    {
+      "userId": "441595c1-474c-4909-b26f-05fe26717e81",
+      "role": "encargado",
+      "groupId": "10",
+      "updatedAt": "2026-02-12T17:56:29.625Z"
+    },
+    {
+      "userId": "3d804c59-59e5-4c40-a588-0e2a605947d1",
+      "role": "encargado",
+      "groupId": "10",
+      "updatedAt": "2026-02-13T15:15:38.249Z"
+    }
+  ],
+  "tripGroups": {
+    "24": "grp-1770917067406-348724",
+    "25": "10"
+  }
+}
