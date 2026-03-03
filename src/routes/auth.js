@@ -1,6 +1,7 @@
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 const { issuePassengerToken } = require("../middleware/passengerSession");
+const { requirePassengerSession } = require("../middleware/passengerSession");
 
 const router = express.Router();
 
@@ -8,6 +9,22 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+
+const PHONE_REGEX = /^11\d{8}$/;
+
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "").trim();
+}
+
+function normalizeDescription(value) {
+  return String(value || "").trim();
+}
+
+function isPassengerProfileComplete(user) {
+  const phone = normalizePhone(user?.phone);
+  const description = normalizeDescription(user?.description);
+  return PHONE_REGEX.test(phone) && description.length > 0;
+}
 
 const withTimeout = async (promise, ms, label) => {
   let timeoutId;
@@ -158,7 +175,7 @@ router.post("/passenger-login", async (req, res) => {
 
     const { data: user, error } = await supabase
       .from("users")
-      .select("id, name, role")
+      .select("id, name, role, phone, description")
       .eq("dni", dni)
       .eq("member_number", memberNumber)
       .single();
@@ -169,14 +186,61 @@ router.post("/passenger-login", async (req, res) => {
 
     const passengerToken = issuePassengerToken(user.id);
 
+    const normalizedPhone = normalizePhone(user.phone);
+    const normalizedDescription = normalizeDescription(user.description);
+    const needsProfileCompletion = !isPassengerProfileComplete({
+      phone: normalizedPhone,
+      description: normalizedDescription,
+    });
+
     res.json({
       ...user,
+      phone: normalizedPhone || null,
+      description: normalizedDescription || "",
+      needsProfileCompletion,
       passengerToken,
     });
 
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.put("/passenger-profile", requirePassengerSession, async (req, res) => {
+  try {
+    const userId = req.passengerUserId;
+    const phone = normalizePhone(req.body?.phone);
+    const description = normalizeDescription(req.body?.description);
+
+    if (!PHONE_REGEX.test(phone)) {
+      return res.status(400).json({
+        error: "El teléfono debe empezar con 11 y tener 10 dígitos en total",
+      });
+    }
+
+    if (!description) {
+      return res.status(400).json({ error: "La descripción es obligatoria" });
+    }
+
+    const { data: updatedUser, error } = await supabase
+      .from("users")
+      .update({ phone, description })
+      .eq("id", userId)
+      .select("id, name, role, phone, description")
+      .single();
+
+    if (error || !updatedUser) {
+      return res.status(500).json({ error: error?.message || "No se pudo actualizar el perfil" });
+    }
+
+    return res.json({
+      ...updatedUser,
+      needsProfileCompletion: false,
+    });
+  } catch (err) {
+    console.error("🔥 PASSENGER PROFILE ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
   }
 });
 

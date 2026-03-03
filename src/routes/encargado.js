@@ -53,7 +53,7 @@ async function getTripPassengers(tripId) {
       id,
       boarded,
       stop_id,
-      users ( name, phone ),
+      users ( name, phone, description ),
       stops ( name )
     `)
     .eq("trip_id", tripId)
@@ -99,6 +99,7 @@ function groupPassengersByStop(passengers, timeMap) {
       reservationId: p.id,
       name: p.users?.name || "Sin nombre",
       phone: p.users?.phone || null,
+      description: p.users?.description || "",
       boarded: Boolean(p.boarded),
     });
   }
