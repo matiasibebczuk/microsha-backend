@@ -11,6 +11,7 @@ const {
 const {
   assignTripToGroup,
   getTripIdsForGroup,
+  getUnassignedTripIds,
 } = require("../middleware/groupStore");
 const {
   verifyPassengerToken,
@@ -87,11 +88,35 @@ router.get("/", async (req, res) => {
     }
 
     const allowedTripIds = await getTripIdsForGroup(context.groupId);
-    if (allowedTripIds.length === 0) {
+
+    let mergedTripIds = [...allowedTripIds];
+
+    if (context.mode === "staff") {
+      const { data: allTripsForRepair, error: allTripsError } = await supabase
+        .from("trips")
+        .select("id")
+        .in("status", ["open", "closed"]);
+
+      throwIfSupabaseError(allTripsError, "trip repair scan failed");
+
+      const allIds = (Array.isArray(allTripsForRepair) ? allTripsForRepair : [])
+        .map((trip) => Number(trip.id))
+        .filter((id) => Number.isFinite(id));
+
+      const unassignedTripIds = await getUnassignedTripIds(allIds);
+
+      if (unassignedTripIds.length > 0) {
+        await Promise.all(unassignedTripIds.map((tripId) => assignTripToGroup(tripId, context.groupId)));
+      }
+
+      mergedTripIds = Array.from(new Set([...allowedTripIds, ...unassignedTripIds]));
+    }
+
+    if (mergedTripIds.length === 0) {
       return res.json([]);
     }
 
-    const rpcTripIds = allowedTripIds
+    const rpcTripIds = mergedTripIds
       .map((id) => Number(id))
       .filter((id) => Number.isFinite(id));
 
@@ -143,27 +168,27 @@ router.get("/", async (req, res) => {
       supabase
         .from("trips")
         .select("id, name, type, departure_datetime, status")
-        .in("id", allowedTripIds)
+        .in("id", mergedTripIds)
         .in("status", ["open", "closed"])
         .order("departure_datetime"),
       supabase
         .from("reservations")
         .select("trip_id, status")
-        .in("trip_id", allowedTripIds)
+        .in("trip_id", mergedTripIds)
         .in("status", ["confirmed", "waiting"]),
       supabase
         .from("trip_buses")
         .select("trip_id, buses ( capacity )")
-        .in("trip_id", allowedTripIds),
+        .in("trip_id", mergedTripIds),
       supabase
         .from("trip_stops")
         .select("trip_id, pickup_time")
-        .in("trip_id", allowedTripIds)
+        .in("trip_id", mergedTripIds)
         .eq("order_index", 1),
       supabase
         .from("trip_runs")
         .select("trip_id, id, started_at, finished_at")
-        .in("trip_id", allowedTripIds)
+        .in("trip_id", mergedTripIds)
         .order("id", { ascending: false }),
     ]);
 

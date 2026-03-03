@@ -176,6 +176,15 @@ async function getTripIdsForGroup(groupId) {
     .filter((id) => Number.isFinite(id));
 }
 
+async function getUnassignedTripIds(tripIds) {
+  const store = await loadStore();
+
+  return (Array.isArray(tripIds) ? tripIds : [])
+    .map((tripId) => Number(tripId))
+    .filter((tripId) => Number.isFinite(tripId))
+    .filter((tripId) => !store.tripGroups[String(tripId)]);
+}
+
 async function bindStaffToGroup({ userId, role, groupId }) {
   const store = await loadStore();
   upsertStaffMembership(store, userId, role, groupId);
@@ -205,6 +214,7 @@ module.exports = {
   assignTripToGroup,
   getTripGroupId,
   getTripIdsForGroup,
+  getUnassignedTripIds,
   bindStaffToGroup,
   getStaffGroupByUserId,
   getGroupPublicById,
