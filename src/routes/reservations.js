@@ -370,7 +370,62 @@ router.get("/mine", requirePassengerSession, async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    return res.json(Array.isArray(data) ? data : []);
+    const reservations = Array.isArray(data) ? data : [];
+    if (reservations.length === 0) {
+      return res.json([]);
+    }
+
+    const tripIds = [...new Set(reservations.map((row) => row.trip_id).filter(Boolean))];
+    const stopIds = [...new Set(reservations.map((row) => row.stop_id).filter(Boolean))];
+
+    const [tripsResult, stopsResult, tripStopsResult] = await Promise.all([
+      supabase
+        .from("trips")
+        .select("id, type")
+        .in("id", tripIds),
+      supabase
+        .from("stops")
+        .select("id, name")
+        .in("id", stopIds),
+      supabase
+        .from("trip_stops")
+        .select("trip_id, stop_id, pickup_time")
+        .in("trip_id", tripIds)
+        .in("stop_id", stopIds),
+    ]);
+
+    if (tripsResult.error) {
+      return res.status(500).json({ error: tripsResult.error.message });
+    }
+    if (stopsResult.error) {
+      return res.status(500).json({ error: stopsResult.error.message });
+    }
+    if (tripStopsResult.error) {
+      return res.status(500).json({ error: tripStopsResult.error.message });
+    }
+
+    const tripsMap = new Map((tripsResult.data || []).map((trip) => [String(trip.id), trip]));
+    const stopsMap = new Map((stopsResult.data || []).map((stop) => [String(stop.id), stop]));
+    const tripStopTimeMap = new Map(
+      (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, row.pickup_time || null])
+    );
+
+    const result = reservations.map((row) => {
+      const trip = tripsMap.get(String(row.trip_id)) || null;
+      const stop = stopsMap.get(String(row.stop_id)) || null;
+      const stopTime = tripStopTimeMap.get(`${row.trip_id}-${row.stop_id}`) || null;
+
+      return {
+        trip_id: row.trip_id,
+        stop_id: row.stop_id,
+        status: row.status,
+        trip_type: trip?.type || null,
+        stop_name: stop?.name || null,
+        stop_time: stopTime,
+      };
+    });
+
+    return res.json(result);
   } catch (err) {
     console.error("🔥 MY RESERVATIONS ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
