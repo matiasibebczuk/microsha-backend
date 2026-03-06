@@ -50,8 +50,8 @@ function isWaitlistWindowActive(waitlistStartAt, waitlistEndAt) {
   return now <= endDt.getTime();
 }
 
-function buildNotificationSchedule() {
-  const promotedAt = new Date();
+function buildNotificationScheduleFromDate(baseDate) {
+  const promotedAt = baseDate instanceof Date ? baseDate : new Date();
   const notifyAfter = new Date(promotedAt.getTime() + 5 * 60 * 1000);
 
   return {
@@ -61,53 +61,72 @@ function buildNotificationSchedule() {
   };
 }
 
-async function promoteWaitingPassenger(tripId) {
-  const capacity = await getTripCapacity(tripId);
-
-  if (capacity <= 0) {
-    return null;
+async function promoteWaitingPassengersIfNeeded(tripId) {
+  const trip = await getTripStatus(tripId);
+  if (!trip?.status || trip.status !== "open") {
+    return { promotedCount: 0 };
   }
 
-  const { count: confirmed } = await supabase
+  const waitlistActive = isWaitlistWindowActive(trip.waitlist_start_at, trip.waitlist_end_at);
+  if (!waitlistActive) {
+    return { promotedCount: 0 };
+  }
+
+  const capacity = await getTripCapacity(tripId);
+  if (capacity <= 0) {
+    return { promotedCount: 0 };
+  }
+
+  const { count: confirmed, error: confirmedError } = await supabase
     .from("reservations")
     .select("*", { count: "exact", head: true })
     .eq("trip_id", tripId)
     .eq("status", "confirmed");
 
-  if ((confirmed || 0) >= capacity) {
-    return null;
+  if (confirmedError) {
+    throw confirmedError;
   }
 
-  const { data: waiting, error: waitingError } = await supabase
+  const availableSeats = Math.max(0, capacity - (confirmed || 0));
+  if (availableSeats === 0) {
+    return { promotedCount: 0 };
+  }
+
+  const { data: waitingRows, error: waitingError } = await supabase
     .from("reservations")
     .select("id")
     .eq("trip_id", tripId)
     .eq("status", "waiting")
     .order("id", { ascending: true })
-    .limit(1);
+    .limit(availableSeats);
 
-  if (waitingError) throw waitingError;
-
-  if (!waiting || waiting.length === 0) {
-    return null;
+  if (waitingError) {
+    throw waitingError;
   }
 
-  const nextReservationId = waiting[0].id;
-  const schedule = buildNotificationSchedule();
+  const reservationIds = (waitingRows || []).map((row) => row.id).filter(Boolean);
+  if (reservationIds.length === 0) {
+    return { promotedCount: 0 };
+  }
 
+  const schedule = buildNotificationScheduleFromDate(new Date());
   const { error: promoteError } = await supabase
     .from("reservations")
     .update({
       status: "confirmed",
       ...schedule,
     })
-    .eq("id", nextReservationId);
+    .in("id", reservationIds);
 
-  if (promoteError) throw promoteError;
+  if (promoteError) {
+    throw promoteError;
+  }
 
-  return nextReservationId;
+  return {
+    promotedCount: reservationIds.length,
+    promotedReservationIds: reservationIds,
+  };
 }
-
 
 // ========================
 // CREAR RESERVA
@@ -190,7 +209,13 @@ router.post("/", requirePassengerSession, async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    res.json({ status });
+    let autoPromotedCount = 0;
+    if (trip.status === "open") {
+      const promotionResult = await promoteWaitingPassengersIfNeeded(tripId);
+      autoPromotedCount = promotionResult.promotedCount || 0;
+    }
+
+    res.json({ status, autoPromotedCount });
 
   } catch (err) {
     console.error("🔥 RESERVATION ERROR:", err);
@@ -248,7 +273,10 @@ router.delete("/", requirePassengerSession, async (req, res) => {
 
     let promotedReservationId = null;
     if (wasConfirmed) {
-      promotedReservationId = await promoteWaitingPassenger(tripId);
+      const { promotedReservationIds } = await promoteWaitingPassengersIfNeeded(tripId);
+      promotedReservationId = Array.isArray(promotedReservationIds)
+        ? promotedReservationIds[0] || null
+        : null;
     }
 
     return res.json({ success: true, promotedReservationId });
