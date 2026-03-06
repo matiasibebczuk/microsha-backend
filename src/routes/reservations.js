@@ -27,12 +27,30 @@ async function getTripCapacity(tripId) {
 async function getTripStatus(tripId) {
   const { data, error } = await supabase
     .from("trips")
-    .select("status")
+    .select("status, waitlist_start_at")
     .eq("id", tripId)
     .maybeSingle();
 
   if (error) throw error;
-  return data?.status || null;
+  return data || null;
+}
+
+function isWaitlistWindowActive(waitlistStartAt) {
+  if (!waitlistStartAt) return false;
+  const dt = new Date(waitlistStartAt);
+  if (Number.isNaN(dt.getTime())) return false;
+  return dt.getTime() <= Date.now();
+}
+
+function buildNotificationSchedule() {
+  const promotedAt = new Date();
+  const notifyAfter = new Date(promotedAt.getTime() + 5 * 60 * 1000);
+
+  return {
+    waiting_promoted_at: promotedAt.toISOString(),
+    confirm_notify_after: notifyAfter.toISOString(),
+    confirm_notified_at: null,
+  };
 }
 
 async function promoteWaitingPassenger(tripId) {
@@ -67,10 +85,14 @@ async function promoteWaitingPassenger(tripId) {
   }
 
   const nextReservationId = waiting[0].id;
+  const schedule = buildNotificationSchedule();
 
   const { error: promoteError } = await supabase
     .from("reservations")
-    .update({ status: "confirmed" })
+    .update({
+      status: "confirmed",
+      ...schedule,
+    })
     .eq("id", nextReservationId);
 
   if (promoteError) throw promoteError;
@@ -91,8 +113,8 @@ router.post("/", requirePassengerSession, async (req, res) => {
       return res.status(400).json({ error: "Missing data" });
     }
 
-    const tripStatus = await getTripStatus(tripId);
-    if (!tripStatus) {
+    const trip = await getTripStatus(tripId);
+    if (!trip?.status) {
       return res.status(404).json({ error: "Trip not found" });
     }
 
@@ -105,7 +127,7 @@ router.post("/", requirePassengerSession, async (req, res) => {
       return res.status(403).json({ error: "No tenés permisos para anotarte en este viaje" });
     }
 
-    if (tripStatus !== "open") {
+    if (trip.status !== "open") {
       return res.status(400).json({ error: "Inscripción cerrada" });
     }
 
@@ -146,7 +168,8 @@ router.post("/", requirePassengerSession, async (req, res) => {
     const capacity = await getTripCapacity(tripId);
     const hasSeats = (confirmed || 0) < capacity;
 
-    const status = hasSeats ? "confirmed" : "waiting";
+    const forceWaiting = isWaitlistWindowActive(trip.waitlist_start_at);
+    const status = forceWaiting ? "waiting" : hasSeats ? "confirmed" : "waiting";
 
     const { error } = await supabase
       .from("reservations")
@@ -241,8 +264,8 @@ router.put("/change", requirePassengerSession, async (req, res) => {
       return res.status(400).json({ error: "Missing data" });
     }
 
-    const tripStatus = await getTripStatus(tripId);
-    if (!tripStatus) {
+    const trip = await getTripStatus(tripId);
+    if (!trip?.status) {
       return res.status(404).json({ error: "Trip not found" });
     }
 
@@ -255,7 +278,7 @@ router.put("/change", requirePassengerSession, async (req, res) => {
       return res.status(403).json({ error: "No tenés permisos para este viaje" });
     }
 
-    if (tripStatus !== "open") {
+    if (trip.status !== "open") {
       return res.status(400).json({ error: "Inscripción cerrada" });
     }
 
@@ -332,6 +355,98 @@ router.get("/me", requirePassengerSession, async (req, res) => {
   } catch (err) {
     console.error("🔥 MY RESERVATION ERROR:", err);
     res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.get("/notifications", requirePassengerSession, async (req, res) => {
+  try {
+    const userId = req.passengerUserId;
+
+    const { data: reservations, error } = await supabase
+      .from("reservations")
+      .select("id, trip_id, stop_id, confirm_notify_after, status")
+      .eq("user_id", userId)
+      .eq("status", "confirmed")
+      .is("confirm_notified_at", null)
+      .not("confirm_notify_after", "is", null)
+      .lte("confirm_notify_after", new Date().toISOString())
+      .order("confirm_notify_after", { ascending: true })
+      .limit(20);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const pending = Array.isArray(reservations) ? reservations : [];
+    if (pending.length === 0) {
+      return res.json([]);
+    }
+
+    const tripIds = [...new Set(pending.map((r) => r.trip_id).filter(Boolean))];
+    const stopIds = [...new Set(pending.map((r) => r.stop_id).filter(Boolean))];
+
+    const [tripsResult, stopsResult, tripStopsResult] = await Promise.all([
+      supabase
+        .from("trips")
+        .select("id, type, name")
+        .in("id", tripIds),
+      supabase
+        .from("stops")
+        .select("id, name")
+        .in("id", stopIds),
+      supabase
+        .from("trip_stops")
+        .select("trip_id, stop_id, pickup_time")
+        .in("trip_id", tripIds)
+        .in("stop_id", stopIds),
+    ]);
+
+    if (tripsResult.error) {
+      return res.status(500).json({ error: tripsResult.error.message });
+    }
+    if (stopsResult.error) {
+      return res.status(500).json({ error: stopsResult.error.message });
+    }
+    if (tripStopsResult.error) {
+      return res.status(500).json({ error: tripStopsResult.error.message });
+    }
+
+    const tripsMap = new Map((tripsResult.data || []).map((trip) => [String(trip.id), trip]));
+    const stopsMap = new Map((stopsResult.data || []).map((stop) => [String(stop.id), stop]));
+    const tripStopTimeMap = new Map(
+      (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, row.pickup_time || null])
+    );
+
+    const notifications = pending.map((reservation) => {
+      const trip = tripsMap.get(String(reservation.trip_id)) || null;
+      const stop = stopsMap.get(String(reservation.stop_id)) || null;
+      const stopTime = tripStopTimeMap.get(`${reservation.trip_id}-${reservation.stop_id}`) || null;
+
+      return {
+        reservationId: reservation.id,
+        tripId: reservation.trip_id,
+        tripType: trip?.type || null,
+        tripName: trip?.name || null,
+        stopName: stop?.name || null,
+        stopTime,
+        status: reservation.status,
+      };
+    });
+
+    const pendingIds = notifications.map((item) => item.reservationId);
+    const { error: markError } = await supabase
+      .from("reservations")
+      .update({ confirm_notified_at: new Date().toISOString() })
+      .in("id", pendingIds);
+
+    if (markError) {
+      return res.status(500).json({ error: markError.message });
+    }
+
+    return res.json(notifications);
+  } catch (err) {
+    console.error("🔥 RESERVATION NOTIFICATIONS ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
   }
 });
 

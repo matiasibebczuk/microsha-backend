@@ -12,6 +12,17 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+function buildNotificationSchedule() {
+  const promotedAt = new Date();
+  const notifyAfter = new Date(promotedAt.getTime() + 5 * 60 * 1000);
+
+  return {
+    waiting_promoted_at: promotedAt.toISOString(),
+    confirm_notify_after: notifyAfter.toISOString(),
+    confirm_notified_at: null,
+  };
+}
+
 async function getTripCapacity(tripId) {
   const { data, error } = await supabase
     .from("trip_buses")
@@ -106,9 +117,14 @@ router.post("/trips/:tripId/promote/:reservationId", async (req, res) => {
       return res.status(400).json({ error: "La reserva ya no está en espera" });
     }
 
+    const schedule = buildNotificationSchedule();
+
     const { error: promoteError } = await supabase
       .from("reservations")
-      .update({ status: "confirmed" })
+      .update({
+        status: "confirmed",
+        ...schedule,
+      })
       .eq("id", reservationId);
 
     if (promoteError) {
