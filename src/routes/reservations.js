@@ -351,6 +351,34 @@ router.put("/change", requirePassengerSession, async (req, res) => {
 
 
 // ========================
+// MIS RESERVAS (TODOS LOS VIAJES)
+// ========================
+router.get("/mine", requirePassengerSession, async (req, res) => {
+  try {
+    const userId = req.passengerUserId;
+
+    if (!userId) {
+      return res.status(400).json({ error: "Missing data" });
+    }
+
+    const { data, error } = await supabase
+      .from("reservations")
+      .select("trip_id, stop_id, status")
+      .eq("user_id", userId);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    return res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.error("🔥 MY RESERVATIONS ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+
+// ========================
 // MI RESERVA EN UN VIAJE
 // ========================
 router.get("/me", requirePassengerSession, async (req, res) => {
