@@ -75,11 +75,19 @@ function throwIfSupabaseError(error, context) {
   throw wrapped;
 }
 
-function isWaitlistWindowActive(waitlistStartAt) {
+function isWaitlistWindowActive(waitlistStartAt, waitlistEndAt) {
   if (!waitlistStartAt) return false;
-  const dt = new Date(waitlistStartAt);
-  if (Number.isNaN(dt.getTime())) return false;
-  return dt.getTime() <= Date.now();
+  const startDt = new Date(waitlistStartAt);
+  if (Number.isNaN(startDt.getTime())) return false;
+
+  const now = Date.now();
+  if (startDt.getTime() > now) return false;
+
+  if (!waitlistEndAt) return true;
+  const endDt = new Date(waitlistEndAt);
+  if (Number.isNaN(endDt.getTime())) return true;
+
+  return now <= endDt.getTime();
 }
 
 
@@ -141,7 +149,7 @@ router.get("/", async (req, res) => {
 
         const { data: waitlistRows, error: waitlistError } = await supabase
           .from("trips")
-          .select("id, waitlist_start_at")
+          .select("id, waitlist_start_at, waitlist_end_at")
           .in("id", rpcIds);
 
         throwIfSupabaseError(waitlistError, "rpc waitlist lookup failed");
@@ -149,13 +157,18 @@ router.get("/", async (req, res) => {
         const waitlistMap = new Map(
           (Array.isArray(waitlistRows) ? waitlistRows : []).map((row) => [
             Number(row.id),
-            row.waitlist_start_at || null,
+            {
+              start: row.waitlist_start_at || null,
+              end: row.waitlist_end_at || null,
+            },
           ])
         );
 
         const rpcResult = rpcRows.map((row) => {
-          const waitlistStartAt = waitlistMap.get(Number(row.id)) || null;
-          const waitlistActive = isWaitlistWindowActive(waitlistStartAt);
+          const waitlistRange = waitlistMap.get(Number(row.id)) || { start: null, end: null };
+          const waitlistStartAt = waitlistRange.start;
+          const waitlistEndAt = waitlistRange.end;
+          const waitlistActive = isWaitlistWindowActive(waitlistStartAt, waitlistEndAt);
 
           return {
             id: row.id,
@@ -176,6 +189,7 @@ router.get("/", async (req, res) => {
             active_started_at: row.active_started_at || null,
             last_finished_at: row.last_finished_at || null,
             waitlist_start_at: waitlistStartAt,
+            waitlist_end_at: waitlistEndAt,
           };
         });
 
@@ -203,7 +217,7 @@ router.get("/", async (req, res) => {
     ] = await Promise.all([
       supabase
         .from("trips")
-        .select("id, name, type, departure_datetime, status, waitlist_start_at")
+        .select("id, name, type, departure_datetime, status, waitlist_start_at, waitlist_end_at")
         .in("id", mergedTripIds)
         .in("status", ["open", "closed"])
         .order("departure_datetime"),
@@ -285,6 +299,7 @@ router.get("/", async (req, res) => {
       const key = String(trip.id);
       const counts = reservationMap.get(key) || { confirmed: 0, waiting: 0 };
       const capacity = capacityMap.get(key) || 0;
+      const waitlistActive = isWaitlistWindowActive(trip.waitlist_start_at, trip.waitlist_end_at);
 
       return {
         id: trip.id,
@@ -292,13 +307,22 @@ router.get("/", async (req, res) => {
         type: trip.type,
         status: trip.status,
         time: trip.departure_datetime,
-        mode: counts.confirmed < capacity ? "available" : "waiting",
+        mode:
+          trip.status !== "open"
+            ? "closed"
+            : waitlistActive
+              ? "waiting"
+              : counts.confirmed < capacity
+                ? "available"
+                : "waiting",
         confirmed: counts.confirmed,
         waiting: counts.waiting,
         capacity,
         first_time: firstStopMap.get(key) || null,
         active_started_at: activeRunMap.get(key) || null,
         last_finished_at: finishedRunMap.get(key) || null,
+        waitlist_start_at: trip.waitlist_start_at || null,
+        waitlist_end_at: trip.waitlist_end_at || null,
       };
     });
 
@@ -374,7 +398,7 @@ router.get("/:id/stops", async (req, res) => {
 // ========================
 router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
   try {
-    const { name, type, departure_datetime, waitlist_start_at } = req.body;
+    const { name, type, departure_datetime, waitlist_start_at, waitlist_end_at } = req.body;
 
     const payload = {
       name,
@@ -385,6 +409,9 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
 
     if (waitlist_start_at !== undefined) {
       payload.waitlist_start_at = waitlist_start_at || null;
+    }
+    if (waitlist_end_at !== undefined) {
+      payload.waitlist_end_at = waitlist_end_at || null;
     }
 
     const { data, error } = await supabase
@@ -814,7 +841,7 @@ router.put("/:id/stops/sync", auth, requireRole("admin"), requireStaffGroup, asy
 router.put("/:id", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
   try {
     const tripId = req.params.id;
-    const { name, type, departure_datetime, waitlist_start_at } = req.body;
+    const { name, type, departure_datetime, waitlist_start_at, waitlist_end_at } = req.body;
 
     const allowed = await assertTripInGroup(tripId, req.groupId);
     if (!allowed) {
@@ -826,6 +853,7 @@ router.put("/:id", auth, requireRole("admin"), requireStaffGroup, async (req, re
     if (type !== undefined) payload.type = type;
     if (departure_datetime !== undefined) payload.departure_datetime = departure_datetime;
     if (waitlist_start_at !== undefined) payload.waitlist_start_at = waitlist_start_at || null;
+    if (waitlist_end_at !== undefined) payload.waitlist_end_at = waitlist_end_at || null;
 
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ error: "No data to update" });

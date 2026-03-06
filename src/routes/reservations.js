@@ -27,7 +27,7 @@ async function getTripCapacity(tripId) {
 async function getTripStatus(tripId) {
   const { data, error } = await supabase
     .from("trips")
-    .select("status, waitlist_start_at")
+    .select("status, waitlist_start_at, waitlist_end_at")
     .eq("id", tripId)
     .maybeSingle();
 
@@ -35,11 +35,19 @@ async function getTripStatus(tripId) {
   return data || null;
 }
 
-function isWaitlistWindowActive(waitlistStartAt) {
+function isWaitlistWindowActive(waitlistStartAt, waitlistEndAt) {
   if (!waitlistStartAt) return false;
-  const dt = new Date(waitlistStartAt);
-  if (Number.isNaN(dt.getTime())) return false;
-  return dt.getTime() <= Date.now();
+  const startDt = new Date(waitlistStartAt);
+  if (Number.isNaN(startDt.getTime())) return false;
+
+  const now = Date.now();
+  if (startDt.getTime() > now) return false;
+
+  if (!waitlistEndAt) return true;
+  const endDt = new Date(waitlistEndAt);
+  if (Number.isNaN(endDt.getTime())) return true;
+
+  return now <= endDt.getTime();
 }
 
 function buildNotificationSchedule() {
@@ -168,7 +176,7 @@ router.post("/", requirePassengerSession, async (req, res) => {
     const capacity = await getTripCapacity(tripId);
     const hasSeats = (confirmed || 0) < capacity;
 
-    const forceWaiting = isWaitlistWindowActive(trip.waitlist_start_at);
+    const forceWaiting = isWaitlistWindowActive(trip.waitlist_start_at, trip.waitlist_end_at);
     const status = forceWaiting ? "waiting" : hasSeats ? "confirmed" : "waiting";
 
     const { error } = await supabase
