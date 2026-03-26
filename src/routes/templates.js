@@ -63,14 +63,36 @@ router.post("/:id/stops", auth, requireRole("admin"), async (req, res) => {
   const templateId = req.params.id;
   const { name, order_index, offset_minutes } = req.body;
 
-  const { error } = await supabase
+  const { data: existing, error: existingError } = await supabase
     .from("route_template_stops")
-    .insert({
-      template_id: templateId,
-      name,
-      order_index,
-      offset_minutes,
-    });
+    .select("id")
+    .eq("template_id", templateId)
+    .eq("order_index", order_index)
+    .maybeSingle();
+
+  if (existingError) return res.status(500).json({ error: existingError.message });
+
+  let error;
+  if (existing?.id) {
+    const updateResult = await supabase
+      .from("route_template_stops")
+      .update({
+        name,
+        offset_minutes,
+      })
+      .eq("id", existing.id);
+    error = updateResult.error;
+  } else {
+    const insertResult = await supabase
+      .from("route_template_stops")
+      .insert({
+        template_id: templateId,
+        name,
+        order_index,
+        offset_minutes,
+      });
+    error = insertResult.error;
+  }
 
   if (error) return res.status(500).json({ error: error.message });
 
