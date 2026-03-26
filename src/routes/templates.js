@@ -99,6 +99,54 @@ router.post("/:id/stops", auth, requireRole("admin"), async (req, res) => {
   res.json({ success: true });
 });
 
+router.put("/:id/stops", auth, requireRole("admin"), async (req, res) => {
+  const templateId = req.params.id;
+  const incomingStops = Array.isArray(req.body?.stops) ? req.body.stops : null;
+
+  if (!incomingStops) {
+    return res.status(400).json({ error: "stops debe ser un array" });
+  }
+
+  const normalized = incomingStops.map((stop, index) => {
+    const name = String(stop?.name || "").trim();
+    const offset = Number.parseInt(stop?.offset_minutes, 10);
+    return {
+      name,
+      order_index: index + 1,
+      offset_minutes: Number.isFinite(offset) ? offset : 0,
+    };
+  });
+
+  const hasInvalid = normalized.some((stop) => !stop.name);
+  if (hasInvalid) {
+    return res.status(400).json({ error: "Todas las paradas deben tener nombre" });
+  }
+
+  const { error: deleteError } = await supabase
+    .from("route_template_stops")
+    .delete()
+    .eq("template_id", templateId);
+
+  if (deleteError) return res.status(500).json({ error: deleteError.message });
+
+  if (normalized.length > 0) {
+    const rows = normalized.map((stop) => ({
+      template_id: templateId,
+      name: stop.name,
+      order_index: stop.order_index,
+      offset_minutes: stop.offset_minutes,
+    }));
+
+    const { error: insertError } = await supabase
+      .from("route_template_stops")
+      .insert(rows);
+
+    if (insertError) return res.status(500).json({ error: insertError.message });
+  }
+
+  return res.json({ success: true });
+});
+
 router.delete("/:id", auth, requireRole("admin"), async (req, res) => {
   const templateId = req.params.id;
 
