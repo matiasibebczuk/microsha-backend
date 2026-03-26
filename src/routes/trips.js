@@ -75,7 +75,21 @@ function throwIfSupabaseError(error, context) {
   throw wrapped;
 }
 
-function isWaitlistWindowActive(waitlistStartAt, waitlistEndAt) {
+function parseTimeToMinutes(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+
+  const hh = Number(match[1]);
+  const mm = Number(match[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) {
+    return null;
+  }
+
+  return hh * 60 + mm;
+}
+
+function isWaitlistWindowActiveLegacy(waitlistStartAt, waitlistEndAt) {
   if (!waitlistStartAt) return false;
   const startDt = new Date(waitlistStartAt);
   if (Number.isNaN(startDt.getTime())) return false;
@@ -88,6 +102,62 @@ function isWaitlistWindowActive(waitlistStartAt, waitlistEndAt) {
   if (Number.isNaN(endDt.getTime())) return true;
 
   return now <= endDt.getTime();
+}
+
+function isWaitlistWindowActiveBySchedule(startDay, startTime, endDay, endTime) {
+  const normalizedStartDay = Number(startDay);
+  if (!Number.isInteger(normalizedStartDay) || normalizedStartDay < 0 || normalizedStartDay > 6) {
+    return false;
+  }
+
+  const startMinutes = parseTimeToMinutes(startTime);
+  if (startMinutes === null) return false;
+
+  const now = new Date();
+  const nowMs = now.getTime();
+
+  const startPoint = new Date(now);
+  startPoint.setHours(0, 0, 0, 0);
+  const daysSinceStart = (startPoint.getDay() - normalizedStartDay + 7) % 7;
+  startPoint.setDate(startPoint.getDate() - daysSinceStart);
+  startPoint.setMinutes(startMinutes);
+
+  if (startPoint.getTime() > nowMs) {
+    startPoint.setDate(startPoint.getDate() - 7);
+  }
+
+  const normalizedEndDay = Number(endDay);
+  const endMinutes = parseTimeToMinutes(endTime);
+  if (!Number.isInteger(normalizedEndDay) || normalizedEndDay < 0 || normalizedEndDay > 6 || endMinutes === null) {
+    return nowMs >= startPoint.getTime();
+  }
+
+  const daysDelta = (normalizedEndDay - normalizedStartDay + 7) % 7;
+  const endPoint = new Date(startPoint);
+  endPoint.setDate(endPoint.getDate() + daysDelta);
+  endPoint.setHours(0, 0, 0, 0);
+  endPoint.setMinutes(endMinutes);
+
+  if (daysDelta === 0 && endMinutes <= startMinutes) {
+    endPoint.setDate(endPoint.getDate() + 7);
+  }
+
+  return nowMs >= startPoint.getTime() && nowMs <= endPoint.getTime();
+}
+
+function isWaitlistWindowActive(trip) {
+  if (!trip || typeof trip !== "object") return false;
+
+  if (trip.waitlist_start_day !== null && trip.waitlist_start_day !== undefined && trip.waitlist_start_time) {
+    return isWaitlistWindowActiveBySchedule(
+      trip.waitlist_start_day,
+      trip.waitlist_start_time,
+      trip.waitlist_end_day,
+      trip.waitlist_end_time
+    );
+  }
+
+  return isWaitlistWindowActiveLegacy(trip.waitlist_start_at, trip.waitlist_end_at);
 }
 
 
@@ -149,7 +219,7 @@ router.get("/", async (req, res) => {
 
         const { data: waitlistRows, error: waitlistError } = await supabase
           .from("trips")
-          .select("id, waitlist_start_at, waitlist_end_at")
+          .select("id, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
           .in("id", rpcIds);
 
         throwIfSupabaseError(waitlistError, "rpc waitlist lookup failed");
@@ -160,15 +230,31 @@ router.get("/", async (req, res) => {
             {
               start: row.waitlist_start_at || null,
               end: row.waitlist_end_at || null,
+              startDay: row.waitlist_start_day ?? null,
+              startTime: row.waitlist_start_time || null,
+              endDay: row.waitlist_end_day ?? null,
+              endTime: row.waitlist_end_time || null,
             },
           ])
         );
 
         const rpcResult = rpcRows.map((row) => {
-          const waitlistRange = waitlistMap.get(Number(row.id)) || { start: null, end: null };
-          const waitlistStartAt = waitlistRange.start;
-          const waitlistEndAt = waitlistRange.end;
-          const waitlistActive = isWaitlistWindowActive(waitlistStartAt, waitlistEndAt);
+          const waitlistRange = waitlistMap.get(Number(row.id)) || {
+            start: null,
+            end: null,
+            startDay: null,
+            startTime: null,
+            endDay: null,
+            endTime: null,
+          };
+          const waitlistActive = isWaitlistWindowActive({
+            waitlist_start_at: waitlistRange.start,
+            waitlist_end_at: waitlistRange.end,
+            waitlist_start_day: waitlistRange.startDay,
+            waitlist_start_time: waitlistRange.startTime,
+            waitlist_end_day: waitlistRange.endDay,
+            waitlist_end_time: waitlistRange.endTime,
+          });
 
           return {
             id: row.id,
@@ -188,8 +274,12 @@ router.get("/", async (req, res) => {
             first_time: row.first_time || null,
             active_started_at: row.active_started_at || null,
             last_finished_at: row.last_finished_at || null,
-            waitlist_start_at: waitlistStartAt,
-            waitlist_end_at: waitlistEndAt,
+            waitlist_start_at: waitlistRange.start,
+            waitlist_end_at: waitlistRange.end,
+            waitlist_start_day: waitlistRange.startDay,
+            waitlist_start_time: waitlistRange.startTime,
+            waitlist_end_day: waitlistRange.endDay,
+            waitlist_end_time: waitlistRange.endTime,
           };
         });
 
@@ -217,7 +307,7 @@ router.get("/", async (req, res) => {
     ] = await Promise.all([
       supabase
         .from("trips")
-        .select("id, name, type, departure_datetime, status, waitlist_start_at, waitlist_end_at")
+        .select("id, name, type, departure_datetime, status, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
         .in("id", mergedTripIds)
         .in("status", ["open", "closed"])
         .order("departure_datetime"),
@@ -299,7 +389,7 @@ router.get("/", async (req, res) => {
       const key = String(trip.id);
       const counts = reservationMap.get(key) || { confirmed: 0, waiting: 0 };
       const capacity = capacityMap.get(key) || 0;
-      const waitlistActive = isWaitlistWindowActive(trip.waitlist_start_at, trip.waitlist_end_at);
+      const waitlistActive = isWaitlistWindowActive(trip);
 
       return {
         id: trip.id,
@@ -323,6 +413,10 @@ router.get("/", async (req, res) => {
         last_finished_at: finishedRunMap.get(key) || null,
         waitlist_start_at: trip.waitlist_start_at || null,
         waitlist_end_at: trip.waitlist_end_at || null,
+        waitlist_start_day: trip.waitlist_start_day ?? null,
+        waitlist_start_time: trip.waitlist_start_time || null,
+        waitlist_end_day: trip.waitlist_end_day ?? null,
+        waitlist_end_time: trip.waitlist_end_time || null,
       };
     });
 
@@ -398,7 +492,17 @@ router.get("/:id/stops", async (req, res) => {
 // ========================
 router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
   try {
-    const { name, type, departure_datetime, waitlist_start_at, waitlist_end_at } = req.body;
+    const {
+      name,
+      type,
+      departure_datetime,
+      waitlist_start_at,
+      waitlist_end_at,
+      waitlist_start_day,
+      waitlist_start_time,
+      waitlist_end_day,
+      waitlist_end_time,
+    } = req.body;
 
     const payload = {
       name,
@@ -412,6 +516,18 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
     }
     if (waitlist_end_at !== undefined) {
       payload.waitlist_end_at = waitlist_end_at || null;
+    }
+    if (waitlist_start_day !== undefined) {
+      payload.waitlist_start_day = waitlist_start_day === null || waitlist_start_day === "" ? null : Number(waitlist_start_day);
+    }
+    if (waitlist_start_time !== undefined) {
+      payload.waitlist_start_time = waitlist_start_time || null;
+    }
+    if (waitlist_end_day !== undefined) {
+      payload.waitlist_end_day = waitlist_end_day === null || waitlist_end_day === "" ? null : Number(waitlist_end_day);
+    }
+    if (waitlist_end_time !== undefined) {
+      payload.waitlist_end_time = waitlist_end_time || null;
     }
 
     const { data, error } = await supabase
@@ -841,7 +957,17 @@ router.put("/:id/stops/sync", auth, requireRole("admin"), requireStaffGroup, asy
 router.put("/:id", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
   try {
     const tripId = req.params.id;
-    const { name, type, departure_datetime, waitlist_start_at, waitlist_end_at } = req.body;
+    const {
+      name,
+      type,
+      departure_datetime,
+      waitlist_start_at,
+      waitlist_end_at,
+      waitlist_start_day,
+      waitlist_start_time,
+      waitlist_end_day,
+      waitlist_end_time,
+    } = req.body;
 
     const allowed = await assertTripInGroup(tripId, req.groupId);
     if (!allowed) {
@@ -854,6 +980,10 @@ router.put("/:id", auth, requireRole("admin"), requireStaffGroup, async (req, re
     if (departure_datetime !== undefined) payload.departure_datetime = departure_datetime;
     if (waitlist_start_at !== undefined) payload.waitlist_start_at = waitlist_start_at || null;
     if (waitlist_end_at !== undefined) payload.waitlist_end_at = waitlist_end_at || null;
+    if (waitlist_start_day !== undefined) payload.waitlist_start_day = waitlist_start_day === null || waitlist_start_day === "" ? null : Number(waitlist_start_day);
+    if (waitlist_start_time !== undefined) payload.waitlist_start_time = waitlist_start_time || null;
+    if (waitlist_end_day !== undefined) payload.waitlist_end_day = waitlist_end_day === null || waitlist_end_day === "" ? null : Number(waitlist_end_day);
+    if (waitlist_end_time !== undefined) payload.waitlist_end_time = waitlist_end_time || null;
 
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ error: "No data to update" });
