@@ -51,13 +51,15 @@ async function getTripPassengers(tripId) {
     .from("reservations")
     .select(`
       id,
+      status,
       boarded,
       stop_id,
       users ( name, phone, description ),
       stops ( name )
     `)
     .eq("trip_id", tripId)
-    .eq("status", "confirmed");
+    .in("status", ["confirmed", "waiting"])
+    .order("id", { ascending: true });
 
   if (error) throw error;
 
@@ -97,6 +99,7 @@ function groupPassengersByStop(passengers, timeMap) {
 
     grouped[stopId].passengers.push({
       reservationId: p.id,
+      status: p.status || "confirmed",
       name: p.users?.name || "Sin nombre",
       phone: p.users?.phone || null,
       description: p.users?.description || "",
@@ -357,19 +360,23 @@ router.get("/trips/:tripId/dashboard", async (req, res) => {
 
     const { data, error } = await supabase
       .from("reservations")
-      .select("boarded")
-      .eq("trip_id", tripId)
-      .eq("status", "confirmed");
+        .select("boarded, status")
+        .eq("trip_id", tripId)
+        .in("status", ["confirmed", "waiting"]);
 
     if (error) {
       return res.status(500).json({ error: error.message });
     }
 
-    const total = data.length;
-    const boarded = data.filter((p) => p.boarded).length;
+    const rows = Array.isArray(data) ? data : [];
+    const confirmedRows = rows.filter((p) => p.status === "confirmed");
+    const waitingRows = rows.filter((p) => p.status === "waiting");
+    const total = confirmedRows.length;
+    const boarded = confirmedRows.filter((p) => p.boarded).length;
     const missing = total - boarded;
+    const waiting = waitingRows.length;
 
-    return res.json({ total, boarded, missing });
+    return res.json({ total, boarded, missing, waiting });
   } catch (err) {
     console.error("🔥 ENCARGADO DASHBOARD ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
