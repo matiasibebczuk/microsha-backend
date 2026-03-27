@@ -13,6 +13,7 @@ const {
   getTripIdsForGroup,
   getUnassignedTripIds,
 } = require("../middleware/groupStore");
+const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
 const {
   verifyPassengerToken,
   getPassengerTokenFromRequest,
@@ -1137,6 +1138,34 @@ router.post("/:id/reinforcement", auth, requireRole("admin"), requireStaffGroup,
       return res.status(400).json({ error: "Debe quedar al menos una parada en el traslado original" });
     }
 
+    const [confirmedResult, waitingResult, capacityRows] = await Promise.all([
+      supabase
+        .from("reservations")
+        .select("*", { count: "exact", head: true })
+        .eq("trip_id", tripId)
+        .eq("status", "confirmed"),
+      supabase
+        .from("reservations")
+        .select("*", { count: "exact", head: true })
+        .eq("trip_id", tripId)
+        .eq("status", "waiting"),
+      supabase
+        .from("trip_buses")
+        .select("buses ( capacity )")
+        .eq("trip_id", tripId),
+    ]);
+
+    if (confirmedResult.error) return res.status(500).json({ error: confirmedResult.error.message });
+    if (waitingResult.error) return res.status(500).json({ error: waitingResult.error.message });
+    if (capacityRows.error) return res.status(500).json({ error: capacityRows.error.message });
+
+    const parentCapacity = (capacityRows.data || []).reduce(
+      (sum, row) => sum + Number(row?.buses?.capacity || 0),
+      0
+    );
+    const confirmedCount = confirmedResult.count || 0;
+    const waitingCount = waitingResult.count || 0;
+
     const { data: activeConfig, error: activeConfigError } = await supabase
       .from("trip_reinforcement_configs")
       .select("active_reinforcement_trip_id")
@@ -1243,6 +1272,19 @@ router.post("/:id/reinforcement", auth, requireRole("admin"), requireStaffGroup,
       }, { onConflict: "parent_trip_id" });
 
     if (upsertConfigError) return res.status(500).json({ error: upsertConfigError.message });
+
+    try {
+      await notifyAdminsReinforcementActivated({
+        groupId: req.groupId,
+        tripName: parentTrip.name || `Traslado ${tripId}`,
+        reinforcementTripName,
+        capacity: parentCapacity,
+        confirmed: confirmedCount || 0,
+        waiting: waitingCount || 0,
+      });
+    } catch (notifyError) {
+      console.error("⚠️ REINFORCEMENT EMAIL ALERT ERROR:", notifyError);
+    }
 
     return res.json({ success: true, reinforcement_trip_id: createdTrip.id });
   } catch (err) {

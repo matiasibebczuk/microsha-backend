@@ -196,6 +196,12 @@ async function getStaffGroupByUserId(userId) {
   return getStaffMembership(store, userId)?.groupId || null;
 }
 
+async function getStaffMembershipsByGroup(groupId) {
+  const store = await loadStore();
+  const wanted = String(groupId);
+  return (store.staffMemberships || []).filter((membership) => String(membership.groupId) === wanted);
+}
+
 async function getGroupPublicById(groupId) {
   const store = await loadStore();
   const group = getGroupById(store, groupId);
@@ -217,5 +223,6 @@ module.exports = {
   getUnassignedTripIds,
   bindStaffToGroup,
   getStaffGroupByUserId,
+  getStaffMembershipsByGroup,
   getGroupPublicById,
 };
