@@ -12,6 +12,7 @@ const {
   assignTripToGroup,
   getTripIdsForGroup,
   getUnassignedTripIds,
+  getGroupPublicById,
 } = require("../middleware/groupStore");
 const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
 const {
@@ -47,7 +48,12 @@ async function resolveRequestGroupId(req) {
       return { error: "Primero debes crear o unirte a un grupo", status: 403 };
     }
 
-    return { groupId: String(groupId), mode: "staff", userId: data.user.id };
+    const group = await getGroupPublicById(groupId);
+    if (!group) {
+      return { error: "No pudimos validar tu grupo. Vuelve a unirte al grupo.", status: 403 };
+    }
+
+    return { groupId: String(group.id), mode: "staff", userId: data.user.id };
   }
 
   const passengerToken = getPassengerTokenFromRequest(req);
@@ -205,7 +211,13 @@ router.get("/", async (req, res) => {
       const unassignedTripIds = await getUnassignedTripIds(allIds);
 
       if (unassignedTripIds.length > 0) {
-        await Promise.all(unassignedTripIds.map((tripId) => assignTripToGroup(tripId, context.groupId)));
+        const assignmentResults = await Promise.allSettled(
+          unassignedTripIds.map((tripId) => assignTripToGroup(tripId, context.groupId))
+        );
+        const failedAssignments = assignmentResults.filter((result) => result.status === "rejected");
+        if (failedAssignments.length > 0) {
+          console.warn("⚠️ Some trip group auto-assignments failed:", failedAssignments.length);
+        }
       }
 
       mergedTripIds = Array.from(new Set([...allowedTripIds, ...unassignedTripIds]));

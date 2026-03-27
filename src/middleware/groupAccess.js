@@ -2,6 +2,7 @@ const { createClient } = require("@supabase/supabase-js");
 const {
   getStaffGroupByUserId,
   getTripGroupId,
+  getGroupPublicById,
 } = require("./groupStore");
 
 const supabase = createClient(
@@ -52,7 +53,14 @@ async function requireStaffGroup(req, res, next) {
       });
     }
 
-    req.groupId = String(groupId);
+    const group = await getGroupPublicById(groupId);
+    if (!group) {
+      return res.status(403).json({
+        error: "No pudimos validar tu grupo. Vuelve a unirte al grupo.",
+      });
+    }
+
+    req.groupId = String(group.id);
     return next();
   } catch (err) {
     console.error("GROUP STAFF RESOLVE ERROR:", err);
