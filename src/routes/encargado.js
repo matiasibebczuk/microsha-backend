@@ -121,6 +121,75 @@ async function getTripById(tripId) {
   return data;
 }
 
+async function cleanupForcedReinforcementAfterFinish(parentTripId) {
+  const { data: config, error: configError } = await supabase
+    .from("trip_reinforcement_configs")
+    .select("parent_trip_id, active_reinforcement_trip_id, parent_stops_snapshot")
+    .eq("parent_trip_id", parentTripId)
+    .maybeSingle();
+
+  if (configError) throw configError;
+  if (!config?.active_reinforcement_trip_id) return;
+
+  const reinforcementTripId = config.active_reinforcement_trip_id;
+  const snapshot = (() => {
+    if (Array.isArray(config.parent_stops_snapshot)) return config.parent_stops_snapshot;
+    if (typeof config.parent_stops_snapshot === "string") {
+      try {
+        const parsed = JSON.parse(config.parent_stops_snapshot);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  })();
+
+  if (snapshot.length > 0) {
+    const { error: deleteParentStopsError } = await supabase
+      .from("trip_stops")
+      .delete()
+      .eq("trip_id", parentTripId);
+
+    if (deleteParentStopsError) throw deleteParentStopsError;
+
+    const restoreRows = snapshot
+      .map((row, index) => ({
+        trip_id: parentTripId,
+        stop_id: row.stop_id,
+        pickup_time: row.pickup_time,
+        order_index: Number(row.order_index || index + 1),
+      }))
+      .filter((row) => row.stop_id);
+
+    if (restoreRows.length > 0) {
+      const { error: restoreError } = await supabase
+        .from("trip_stops")
+        .insert(restoreRows);
+      if (restoreError) throw restoreError;
+    }
+  }
+
+  await supabase.from("reservations").delete().eq("trip_id", reinforcementTripId);
+
+  const { error: archiveError } = await supabase
+    .from("trips")
+    .update({ status: "archived" })
+    .eq("id", reinforcementTripId);
+
+  if (archiveError) throw archiveError;
+
+  const { error: clearConfigError } = await supabase
+    .from("trip_reinforcement_configs")
+    .update({
+      active_reinforcement_trip_id: null,
+      parent_stops_snapshot: null,
+    })
+    .eq("parent_trip_id", parentTripId);
+
+  if (clearConfigError) throw clearConfigError;
+}
+
 async function appendAttendanceLog(entry) {
   await fs.promises.mkdir(logsDir, { recursive: true });
   await fs.promises.appendFile(attendanceLogPath, `${JSON.stringify(entry)}\n`, "utf8");
@@ -450,6 +519,8 @@ router.post("/trips/:tripId/finish", async (req, res) => {
     if (cleanupError) {
       return res.status(500).json({ error: cleanupError.message });
     }
+
+    await cleanupForcedReinforcementAfterFinish(tripId);
 
     return res.json({
       success: true,

@@ -160,6 +160,19 @@ function isWaitlistWindowActive(trip) {
   return isWaitlistWindowActiveLegacy(trip.waitlist_start_at, trip.waitlist_end_at);
 }
 
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 
 
 // ========================
@@ -1003,6 +1016,237 @@ router.put("/:id", auth, requireRole("admin"), requireStaffGroup, async (req, re
     return res.json(data);
   } catch (err) {
     console.error("🔥 UPDATE TRIP ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+// ========================
+// GET /trips/:id/reinforcement-config
+// ========================
+router.get("/:id/reinforcement-config", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
+  try {
+    const tripId = req.params.id;
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const { data, error } = await supabase
+      .from("trip_reinforcement_configs")
+      .select("parent_trip_id, active_reinforcement_trip_id, split_stop_ids, reinforcement_trip_name, reinforcement_bus_name, reinforcement_bus_capacity")
+      .eq("parent_trip_id", tripId)
+      .maybeSingle();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    if (!data) {
+      return res.json({
+        active: false,
+        active_trip_id: null,
+        split_stop_ids: [],
+        reinforcement_trip_name: null,
+        reinforcement_bus_name: null,
+        reinforcement_bus_capacity: null,
+      });
+    }
+
+    return res.json({
+      active: Boolean(data.active_reinforcement_trip_id),
+      active_trip_id: data.active_reinforcement_trip_id || null,
+      split_stop_ids: parseJsonArray(data.split_stop_ids),
+      reinforcement_trip_name: data.reinforcement_trip_name || null,
+      reinforcement_bus_name: data.reinforcement_bus_name || null,
+      reinforcement_bus_capacity: data.reinforcement_bus_capacity || null,
+    });
+  } catch (err) {
+    console.error("🔥 GET REINFORCEMENT CONFIG ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+// ========================
+// POST /trips/:id/reinforcement
+// body: { name, bus_name, bus_capacity, stop_ids: [] }
+// ========================
+router.post("/:id/reinforcement", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
+  try {
+    const tripId = req.params.id;
+    const {
+      name,
+      bus_name,
+      bus_capacity,
+      stop_ids,
+    } = req.body || {};
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const reinforcementTripName = String(name || "").trim();
+    const reinforcementBusName = String(bus_name || "").trim();
+    const reinforcementBusCapacity = Number(bus_capacity || 0);
+    const selectedStopIds = Array.isArray(stop_ids)
+      ? stop_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+      : [];
+
+    if (!reinforcementTripName) {
+      return res.status(400).json({ error: "Nombre de refuerzo requerido" });
+    }
+    if (!reinforcementBusName) {
+      return res.status(400).json({ error: "Nombre de vehículo requerido" });
+    }
+    if (!Number.isFinite(reinforcementBusCapacity) || reinforcementBusCapacity <= 0) {
+      return res.status(400).json({ error: "Capacidad de vehículo inválida" });
+    }
+    if (selectedStopIds.length === 0) {
+      return res.status(400).json({ error: "Seleccioná al menos una parada para refuerzo" });
+    }
+
+    const { data: parentTrip, error: parentTripError } = await supabase
+      .from("trips")
+      .select("id, name, type, status, departure_datetime, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
+      .eq("id", tripId)
+      .maybeSingle();
+
+    if (parentTripError) return res.status(500).json({ error: parentTripError.message });
+    if (!parentTrip) return res.status(404).json({ error: "Traslado no encontrado" });
+
+    const { data: parentStopsRows, error: parentStopsError } = await supabase
+      .from("trip_stops")
+      .select("stop_id, pickup_time, order_index, stops ( name )")
+      .eq("trip_id", tripId)
+      .order("order_index", { ascending: true });
+
+    if (parentStopsError) return res.status(500).json({ error: parentStopsError.message });
+
+    const parentStops = Array.isArray(parentStopsRows) ? parentStopsRows : [];
+    if (parentStops.length < 2) {
+      return res.status(400).json({ error: "El traslado debe tener al menos dos paradas" });
+    }
+
+    const selectedSet = new Set(selectedStopIds.map((id) => String(id)));
+    const selectedStops = parentStops.filter((row) => selectedSet.has(String(row.stop_id)));
+    const remainingStops = parentStops.filter((row) => !selectedSet.has(String(row.stop_id)));
+
+    if (selectedStops.length === 0) {
+      return res.status(400).json({ error: "Las paradas seleccionadas no pertenecen al traslado" });
+    }
+    if (remainingStops.length === 0) {
+      return res.status(400).json({ error: "Debe quedar al menos una parada en el traslado original" });
+    }
+
+    const { data: activeConfig, error: activeConfigError } = await supabase
+      .from("trip_reinforcement_configs")
+      .select("active_reinforcement_trip_id")
+      .eq("parent_trip_id", tripId)
+      .maybeSingle();
+
+    if (activeConfigError) return res.status(500).json({ error: activeConfigError.message });
+    if (activeConfig?.active_reinforcement_trip_id) {
+      return res.status(400).json({ error: "Ya existe un refuerzo activo para este traslado" });
+    }
+
+    const { data: createdTrip, error: createTripError } = await supabase
+      .from("trips")
+      .insert({
+        name: reinforcementTripName,
+        type: parentTrip.type,
+        status: parentTrip.status,
+        departure_datetime: parentTrip.departure_datetime,
+        waitlist_start_at: parentTrip.waitlist_start_at,
+        waitlist_end_at: parentTrip.waitlist_end_at,
+        waitlist_start_day: parentTrip.waitlist_start_day,
+        waitlist_start_time: parentTrip.waitlist_start_time,
+        waitlist_end_day: parentTrip.waitlist_end_day,
+        waitlist_end_time: parentTrip.waitlist_end_time,
+      })
+      .select("id")
+      .single();
+
+    if (createTripError) return res.status(500).json({ error: createTripError.message });
+
+    await assignTripToGroup(createdTrip.id, req.groupId);
+
+    const { data: createdBus, error: createBusError } = await supabase
+      .from("buses")
+      .insert({
+        name: reinforcementBusName,
+        capacity: reinforcementBusCapacity,
+        active: true,
+      })
+      .select("id")
+      .single();
+
+    if (createBusError) return res.status(500).json({ error: createBusError.message });
+
+    const { error: linkBusError } = await supabase
+      .from("trip_buses")
+      .insert({
+        trip_id: createdTrip.id,
+        bus_id: createdBus.id,
+      });
+
+    if (linkBusError) return res.status(500).json({ error: linkBusError.message });
+
+    const reinforcementTripStops = selectedStops.map((row, index) => ({
+      trip_id: createdTrip.id,
+      stop_id: row.stop_id,
+      pickup_time: row.pickup_time,
+      order_index: index + 1,
+    }));
+
+    const { error: insertReinforcementStopsError } = await supabase
+      .from("trip_stops")
+      .insert(reinforcementTripStops);
+
+    if (insertReinforcementStopsError) return res.status(500).json({ error: insertReinforcementStopsError.message });
+
+    const parentStopsSnapshot = parentStops.map((row) => ({
+      stop_id: row.stop_id,
+      pickup_time: row.pickup_time,
+      order_index: row.order_index,
+      name: row.stops?.name || null,
+    }));
+
+    const { error: deleteParentStopsError } = await supabase
+      .from("trip_stops")
+      .delete()
+      .eq("trip_id", tripId);
+
+    if (deleteParentStopsError) return res.status(500).json({ error: deleteParentStopsError.message });
+
+    const parentRemainingStops = remainingStops.map((row, index) => ({
+      trip_id: tripId,
+      stop_id: row.stop_id,
+      pickup_time: row.pickup_time,
+      order_index: index + 1,
+    }));
+
+    const { error: insertParentStopsError } = await supabase
+      .from("trip_stops")
+      .insert(parentRemainingStops);
+
+    if (insertParentStopsError) return res.status(500).json({ error: insertParentStopsError.message });
+
+    const { error: upsertConfigError } = await supabase
+      .from("trip_reinforcement_configs")
+      .upsert({
+        parent_trip_id: tripId,
+        active_reinforcement_trip_id: createdTrip.id,
+        parent_stops_snapshot: JSON.stringify(parentStopsSnapshot),
+        split_stop_ids: JSON.stringify(selectedStops.map((row) => row.stop_id)),
+        reinforcement_trip_name: reinforcementTripName,
+        reinforcement_bus_name: reinforcementBusName,
+        reinforcement_bus_capacity: reinforcementBusCapacity,
+      }, { onConflict: "parent_trip_id" });
+
+    if (upsertConfigError) return res.status(500).json({ error: upsertConfigError.message });
+
+    return res.json({ success: true, reinforcement_trip_id: createdTrip.id });
+  } catch (err) {
+    console.error("🔥 CREATE REINFORCEMENT ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
   }
 });
