@@ -70,7 +70,27 @@ router.get("/trips/:tripId/reservations", async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    return res.json(data || []);
+    const { data: tripStops, error: tripStopsError } = await supabase
+      .from("trip_stops")
+      .select("stop_id, order_index")
+      .eq("trip_id", tripId);
+
+    if (tripStopsError) {
+      return res.status(500).json({ error: tripStopsError.message });
+    }
+
+    const stopOrderMap = new Map(
+      (tripStops || []).map((row) => [String(row.stop_id), Number(row.order_index || 0)])
+    );
+
+    const sorted = [...(data || [])].sort((a, b) => {
+      const orderA = stopOrderMap.get(String(a.stop_id)) ?? Number.MAX_SAFE_INTEGER;
+      const orderB = stopOrderMap.get(String(b.stop_id)) ?? Number.MAX_SAFE_INTEGER;
+      if (orderA !== orderB) return orderA - orderB;
+      return Number(a.id || 0) - Number(b.id || 0);
+    });
+
+    return res.json(sorted);
   } catch (err) {
     console.error("🔥 ADMIN RESERVATIONS ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
