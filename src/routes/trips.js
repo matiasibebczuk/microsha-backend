@@ -49,11 +49,12 @@ async function resolveRequestGroupId(req) {
     }
 
     const group = await getGroupPublicById(groupId);
-    if (!group) {
-      return { error: "No pudimos validar tu grupo. Vuelve a unirte al grupo.", status: 403 };
-    }
-
-    return { groupId: String(group.id), mode: "staff", userId: data.user.id };
+    return {
+      groupId: String(group?.id || groupId),
+      mode: "staff",
+      userId: data.user.id,
+      groupValid: Boolean(group),
+    };
   }
 
   const passengerToken = getPassengerTokenFromRequest(req);
@@ -196,7 +197,7 @@ router.get("/", async (req, res) => {
 
     let mergedTripIds = [...allowedTripIds];
 
-    if (context.mode === "staff") {
+    if (context.mode === "staff" && context.groupValid !== false) {
       const { data: allTripsForRepair, error: allTripsError } = await supabase
         .from("trips")
         .select("id")
