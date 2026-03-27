@@ -1232,6 +1232,25 @@ router.post("/:id/reinforcement", auth, requireRole("admin"), requireStaffGroup,
 
     if (insertReinforcementStopsError) return res.status(500).json({ error: insertReinforcementStopsError.message });
 
+    const reinforcementStopIds = selectedStops.map((row) => row.stop_id);
+    const { data: reservationsToMove, error: reservationsToMoveError } = await supabase
+      .from("reservations")
+      .select("id")
+      .eq("trip_id", tripId)
+      .in("stop_id", reinforcementStopIds);
+
+    if (reservationsToMoveError) return res.status(500).json({ error: reservationsToMoveError.message });
+
+    const reservationIdsToMove = (reservationsToMove || []).map((row) => row.id).filter(Boolean);
+    if (reservationIdsToMove.length > 0) {
+      const { error: moveReservationsError } = await supabase
+        .from("reservations")
+        .update({ trip_id: createdTrip.id })
+        .in("id", reservationIdsToMove);
+
+      if (moveReservationsError) return res.status(500).json({ error: moveReservationsError.message });
+    }
+
     const parentStopsSnapshot = parentStops.map((row) => ({
       stop_id: row.stop_id,
       pickup_time: row.pickup_time,
@@ -1286,7 +1305,11 @@ router.post("/:id/reinforcement", auth, requireRole("admin"), requireStaffGroup,
       console.error("⚠️ REINFORCEMENT EMAIL ALERT ERROR:", notifyError);
     }
 
-    return res.json({ success: true, reinforcement_trip_id: createdTrip.id });
+    return res.json({
+      success: true,
+      reinforcement_trip_id: createdTrip.id,
+      moved_reservations: reservationIdsToMove.length,
+    });
   } catch (err) {
     console.error("🔥 CREATE REINFORCEMENT ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
