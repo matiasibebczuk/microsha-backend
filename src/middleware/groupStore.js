@@ -162,6 +162,7 @@ async function createGroup({ name, password, createdBy, groupId }) {
     createdBy: String(createdBy),
     createdAt: new Date().toISOString(),
   };
+  let lastSupabaseRecoverableError = null;
 
   if (supabase) {
     try {
@@ -179,8 +180,14 @@ async function createGroup({ name, password, createdBy, groupId }) {
       if (existingByIdError && !isRecoverableDbError(existingByIdError)) {
         return { error: existingByIdError.message };
       }
+      if (existingByIdError && isRecoverableDbError(existingByIdError)) {
+        lastSupabaseRecoverableError = existingByIdError.message || String(existingByIdError);
+      }
       if (existingByNameError && !isRecoverableDbError(existingByNameError)) {
         return { error: existingByNameError.message };
+      }
+      if (existingByNameError && isRecoverableDbError(existingByNameError)) {
+        lastSupabaseRecoverableError = existingByNameError.message || String(existingByNameError);
       }
 
       if (existingById?.id) {
@@ -206,15 +213,19 @@ async function createGroup({ name, password, createdBy, groupId }) {
       if (!isRecoverableDbError(insertError)) {
         return { error: insertError.message };
       }
+      lastSupabaseRecoverableError = insertError.message || String(insertError);
     } catch (err) {
       if (!isRecoverableDbError(err)) {
         return { error: err.message || "No se pudo crear el grupo" };
       }
+      lastSupabaseRecoverableError = err?.message || String(err);
     }
   }
 
   if (!shouldUseFileFallback) {
-    return { error: "No se pudo crear el grupo en Supabase. Verifica la migracion de grupos." };
+    return {
+      error: `No se pudo crear el grupo en Supabase. ${lastSupabaseRecoverableError || "Verifica la migracion de grupos."}`,
+    };
   }
 
   const store = await loadStore();
@@ -241,6 +252,8 @@ async function joinGroupByCredentials({ name, password }) {
     return { error: "Nombre y contraseña son obligatorios" };
   }
 
+  let lastSupabaseRecoverableError = null;
+
   if (supabase) {
     try {
       const { data: groupRows, error: groupRowsError } = await supabase
@@ -251,6 +264,9 @@ async function joinGroupByCredentials({ name, password }) {
 
       if (groupRowsError && !isRecoverableDbError(groupRowsError)) {
         return { error: groupRowsError.message };
+      }
+      if (groupRowsError && isRecoverableDbError(groupRowsError)) {
+        lastSupabaseRecoverableError = groupRowsError.message || String(groupRowsError);
       }
 
       const dbGroup = Array.isArray(groupRows) && groupRows.length > 0 ? groupRows[0] : null;
@@ -273,11 +289,14 @@ async function joinGroupByCredentials({ name, password }) {
       if (!isRecoverableDbError(err)) {
         return { error: err.message || "No se pudo unir al grupo" };
       }
+      lastSupabaseRecoverableError = err?.message || String(err);
     }
   }
 
   if (!shouldUseFileFallback) {
-    return { error: "No se pudo validar el grupo en Supabase. Verifica la migracion de grupos." };
+    return {
+      error: `No se pudo validar el grupo en Supabase. ${lastSupabaseRecoverableError || "Verifica la migracion de grupos."}`,
+    };
   }
 
   const store = await loadStore();
