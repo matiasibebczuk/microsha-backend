@@ -56,6 +56,14 @@ async function persistUserGroupMetadata(user, role, groupId) {
   });
 }
 
+async function tryPersistUserGroupMetadata(user, role, groupId) {
+  try {
+    await persistUserGroupMetadata(user, role, groupId);
+  } catch (err) {
+    console.error("GROUP METADATA UPDATE WARNING:", err?.message || err);
+  }
+}
+
 router.get("/me", async (req, res) => {
   try {
     const groupId = await getStaffGroupId(req.user);
@@ -97,7 +105,7 @@ router.post("/create", async (req, res) => {
       groupId: group.id,
     });
 
-    await persistUserGroupMetadata(req.user, req.role, group.id);
+    await tryPersistUserGroupMetadata(req.user, req.role, group.id);
 
     return res.status(201).json({
       success: true,
@@ -125,7 +133,7 @@ router.post("/join", async (req, res) => {
       groupId: group.id,
     });
 
-    await persistUserGroupMetadata(req.user, req.role, group.id);
+    await tryPersistUserGroupMetadata(req.user, req.role, group.id);
 
     return res.json({
       success: true,
