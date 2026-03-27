@@ -19,6 +19,20 @@ function isRecoverableDbError(error) {
   return text.includes("does not exist") || text.includes("relation") || text.includes("schema cache") || text.includes("timeout") || text.includes("network");
 }
 
+function errorText(error) {
+  return String(error?.message || error || "").toLowerCase();
+}
+
+function isColumnMissingError(error, columnName) {
+  const text = errorText(error);
+  return text.includes(`column \"${String(columnName).toLowerCase()}\"`) && text.includes("does not exist");
+}
+
+function isNotNullViolationForColumn(error, columnName) {
+  const text = errorText(error);
+  return text.includes(`null value in column \"${String(columnName).toLowerCase()}\"`) && text.includes("not-null constraint");
+}
+
 async function getStaffGroupIdDbType() {
   if (!supabase) return "text";
   if (staffGroupIdDbTypeCache) return staffGroupIdDbTypeCache;
@@ -197,7 +211,8 @@ async function createGroup({ name, password, createdBy, groupId }) {
         return { error: "Ya existe un grupo con ese nombre" };
       }
 
-      const { error: insertError } = await supabase
+      // Support both modern schema (password_hash) and legacy schema (password).
+      const { error: insertErrorModern } = await supabase
         .from("staff_groups")
         .insert({
           id: castGroupId,
@@ -206,14 +221,39 @@ async function createGroup({ name, password, createdBy, groupId }) {
           created_by: group.createdBy,
         });
 
-      if (!insertError) {
+      if (!insertErrorModern) {
         return { group };
       }
 
-      if (!isRecoverableDbError(insertError)) {
-        return { error: insertError.message };
+      const needsLegacyPassword =
+        isNotNullViolationForColumn(insertErrorModern, "password") ||
+        isColumnMissingError(insertErrorModern, "password_hash");
+
+      if (needsLegacyPassword) {
+        const { error: insertErrorLegacy } = await supabase
+          .from("staff_groups")
+          .insert({
+            id: castGroupId,
+            name: group.name,
+            password: group.passwordHash,
+            created_by: group.createdBy,
+          });
+
+        if (!insertErrorLegacy) {
+          return { group };
+        }
+
+        if (!isRecoverableDbError(insertErrorLegacy)) {
+          return { error: insertErrorLegacy.message };
+        }
+
+        lastSupabaseRecoverableError = insertErrorLegacy.message || String(insertErrorLegacy);
+      } else {
+        if (!isRecoverableDbError(insertErrorModern)) {
+          return { error: insertErrorModern.message };
+        }
+        lastSupabaseRecoverableError = insertErrorModern.message || String(insertErrorModern);
       }
-      lastSupabaseRecoverableError = insertError.message || String(insertError);
     } catch (err) {
       if (!isRecoverableDbError(err)) {
         return { error: err.message || "No se pudo crear el grupo" };
@@ -258,7 +298,7 @@ async function joinGroupByCredentials({ name, password }) {
     try {
       const { data: groupRows, error: groupRowsError } = await supabase
         .from("staff_groups")
-        .select("id, name, password_hash, created_by, created_at")
+        .select("*")
         .ilike("name", cleanName)
         .limit(1);
 
@@ -274,7 +314,7 @@ async function joinGroupByCredentials({ name, password }) {
         const group = {
           id: String(dbGroup.id),
           name: dbGroup.name,
-          passwordHash: dbGroup.password_hash,
+          passwordHash: dbGroup.password_hash || dbGroup.password || null,
           createdBy: dbGroup.created_by,
           createdAt: dbGroup.created_at,
         };
