@@ -54,7 +54,7 @@ router.get("/trips/:tripId/reservations", async (req, res) => {
         user_id,
         trip_id,
         stop_id,
-        users ( name, phone ),
+        users ( name, phone, description ),
         stops ( name )
       `)
       .eq("trip_id", tripId)
