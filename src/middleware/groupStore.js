@@ -9,11 +9,44 @@ const hasSupabaseConfig = Boolean(process.env.SUPABASE_URL && process.env.SUPABA
 const supabase = hasSupabaseConfig
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
+let staffGroupIdDbTypeCache = null;
 
 function isRecoverableDbError(error) {
   if (!error) return false;
   const text = String(error.message || error).toLowerCase();
   return text.includes("does not exist") || text.includes("relation") || text.includes("schema cache") || text.includes("timeout") || text.includes("network");
+}
+
+async function getStaffGroupIdDbType() {
+  if (!supabase) return "text";
+  if (staffGroupIdDbTypeCache) return staffGroupIdDbTypeCache;
+
+  const { data, error } = await supabase
+    .from("information_schema.columns")
+    .select("data_type")
+    .eq("table_schema", "public")
+    .eq("table_name", "staff_groups")
+    .eq("column_name", "id")
+    .maybeSingle();
+
+  if (error || !data?.data_type) {
+    staffGroupIdDbTypeCache = "text";
+    return staffGroupIdDbTypeCache;
+  }
+
+  staffGroupIdDbTypeCache = String(data.data_type).toLowerCase();
+  return staffGroupIdDbTypeCache;
+}
+
+function castGroupIdForDb(groupId, dbType) {
+  const value = String(groupId || "").trim();
+  if (!["integer", "bigint", "smallint"].includes(String(dbType || "").toLowerCase())) {
+    return value;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return numeric;
 }
 
 function ensureStoreShape(store) {
@@ -130,8 +163,14 @@ async function createGroup({ name, password, createdBy, groupId }) {
 
   if (supabase) {
     try {
+      const idDbType = await getStaffGroupIdDbType();
+      const castGroupId = castGroupIdForDb(cleanGroupId, idDbType);
+      if (castGroupId === null) {
+        return { error: "El ID de grupo debe ser numérico" };
+      }
+
       const [{ data: existingById, error: existingByIdError }, { data: existingByName, error: existingByNameError }] = await Promise.all([
-        supabase.from("staff_groups").select("id").eq("id", cleanGroupId).maybeSingle(),
+        supabase.from("staff_groups").select("id").eq("id", castGroupId).maybeSingle(),
         supabase.from("staff_groups").select("id").ilike("name", cleanName).maybeSingle(),
       ]);
 
@@ -152,7 +191,7 @@ async function createGroup({ name, password, createdBy, groupId }) {
       const { error: insertError } = await supabase
         .from("staff_groups")
         .insert({
-          id: group.id,
+          id: castGroupId,
           name: group.name,
           password_hash: group.passwordHash,
           created_by: group.createdBy,
@@ -248,11 +287,15 @@ async function joinGroupByCredentials({ name, password }) {
 async function assignTripToGroup(tripId, groupId) {
   if (supabase) {
     try {
+      const idDbType = await getStaffGroupIdDbType();
+      const castGroupId = castGroupIdForDb(groupId, idDbType);
+      if (castGroupId === null) throw new Error("Invalid group id for trip assignment");
+
       const { error } = await supabase
         .from("trip_groups")
         .upsert({
           trip_id: Number(tripId),
-          group_id: String(groupId),
+          group_id: castGroupId,
         }, { onConflict: "trip_id" });
       if (!error) return;
       if (!isRecoverableDbError(error)) throw error;
@@ -288,10 +331,14 @@ async function getTripGroupId(tripId) {
 async function getTripIdsForGroup(groupId) {
   if (supabase) {
     try {
+      const idDbType = await getStaffGroupIdDbType();
+      const castGroupId = castGroupIdForDb(groupId, idDbType);
+      if (castGroupId === null) return [];
+
       const { data, error } = await supabase
         .from("trip_groups")
         .select("trip_id")
-        .eq("group_id", String(groupId));
+        .eq("group_id", castGroupId);
 
       if (!error) {
         return (data || [])
@@ -353,12 +400,16 @@ async function getUnassignedTripIds(tripIds) {
 async function bindStaffToGroup({ userId, role, groupId }) {
   if (supabase) {
     try {
+      const idDbType = await getStaffGroupIdDbType();
+      const castGroupId = castGroupIdForDb(groupId, idDbType);
+      if (castGroupId === null) throw new Error("Invalid group id for membership");
+
       const { error } = await supabase
         .from("staff_group_memberships")
         .upsert({
           user_id: String(userId),
           role: String(role || ""),
-          group_id: String(groupId),
+          group_id: castGroupId,
         }, { onConflict: "user_id" });
       if (!error) return;
       if (!isRecoverableDbError(error)) throw error;
@@ -395,10 +446,14 @@ async function getStaffGroupByUserId(userId) {
 async function getStaffMembershipsByGroup(groupId) {
   if (supabase) {
     try {
+      const idDbType = await getStaffGroupIdDbType();
+      const castGroupId = castGroupIdForDb(groupId, idDbType);
+      if (castGroupId === null) return [];
+
       const { data, error } = await supabase
         .from("staff_group_memberships")
         .select("user_id, role, group_id, updated_at")
-        .eq("group_id", String(groupId));
+        .eq("group_id", castGroupId);
 
       if (!error) {
         return (data || []).map((row) => ({
@@ -422,10 +477,14 @@ async function getStaffMembershipsByGroup(groupId) {
 async function getGroupPublicById(groupId) {
   if (supabase) {
     try {
+      const idDbType = await getStaffGroupIdDbType();
+      const castGroupId = castGroupIdForDb(groupId, idDbType);
+      if (castGroupId === null) return null;
+
       const { data, error } = await supabase
         .from("staff_groups")
         .select("id, name, created_at")
-        .eq("id", String(groupId))
+        .eq("id", castGroupId)
         .maybeSingle();
 
       if (!error && data) {
