@@ -6,6 +6,8 @@ const { createClient } = require("@supabase/supabase-js");
 const dataDir = path.join(__dirname, "..", "..", "data");
 const storePath = path.join(dataDir, "groups.json");
 const hasSupabaseConfig = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+const allowFileFallbackWithSupabase = process.env.ALLOW_GROUP_FILE_FALLBACK === "true";
+const shouldUseFileFallback = !hasSupabaseConfig || allowFileFallbackWithSupabase;
 const supabase = hasSupabaseConfig
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
@@ -211,6 +213,10 @@ async function createGroup({ name, password, createdBy, groupId }) {
     }
   }
 
+  if (!shouldUseFileFallback) {
+    return { error: "No se pudo crear el grupo en Supabase. Verifica la migracion de grupos." };
+  }
+
   const store = await loadStore();
 
   if (getGroupByName(store, cleanName)) {
@@ -270,6 +276,10 @@ async function joinGroupByCredentials({ name, password }) {
     }
   }
 
+  if (!shouldUseFileFallback) {
+    return { error: "No se pudo validar el grupo en Supabase. Verifica la migracion de grupos." };
+  }
+
   const store = await loadStore();
   const group = getGroupByName(store, cleanName);
 
@@ -304,6 +314,8 @@ async function assignTripToGroup(tripId, groupId) {
     }
   }
 
+  if (!shouldUseFileFallback) return;
+
   const store = await loadStore();
   store.tripGroups[String(tripId)] = String(groupId);
   await saveStore(store);
@@ -323,6 +335,8 @@ async function getTripGroupId(tripId) {
       if (!isRecoverableDbError(err)) return null;
     }
   }
+
+  if (!shouldUseFileFallback) return null;
 
   const store = await loadStore();
   return store.tripGroups[String(tripId)] || null;
@@ -354,6 +368,8 @@ async function getTripIdsForGroup(groupId) {
       }
     }
   }
+
+  if (!shouldUseFileFallback) return [];
 
   const store = await loadStore();
   const wanted = String(groupId);
@@ -389,6 +405,8 @@ async function getUnassignedTripIds(tripIds) {
     }
   }
 
+  if (!shouldUseFileFallback) return [];
+
   const store = await loadStore();
 
   return (Array.isArray(tripIds) ? tripIds : [])
@@ -418,6 +436,10 @@ async function bindStaffToGroup({ userId, role, groupId }) {
     }
   }
 
+  if (!shouldUseFileFallback) {
+    throw new Error("No se pudo persistir membresia en Supabase");
+  }
+
   const store = await loadStore();
   upsertStaffMembership(store, userId, role, groupId);
   await saveStore(store);
@@ -438,6 +460,8 @@ async function getStaffGroupByUserId(userId) {
       if (!isRecoverableDbError(err)) return null;
     }
   }
+
+  if (!shouldUseFileFallback) return null;
 
   const store = await loadStore();
   return getStaffMembership(store, userId)?.groupId || null;
@@ -468,6 +492,8 @@ async function getStaffMembershipsByGroup(groupId) {
       if (!isRecoverableDbError(err)) return [];
     }
   }
+
+  if (!shouldUseFileFallback) return [];
 
   const store = await loadStore();
   const wanted = String(groupId);
@@ -501,6 +527,8 @@ async function getGroupPublicById(groupId) {
       if (!isRecoverableDbError(err)) return null;
     }
   }
+
+  if (!shouldUseFileFallback) return null;
 
   const store = await loadStore();
   const group = getGroupById(store, groupId);
