@@ -50,6 +50,18 @@ function parseTimeToMinutes(value) {
   return hh * 60 + mm;
 }
 
+function isWaitlistTemporarilySuppressed(trip) {
+  const hasSchedule = trip?.waitlist_start_day !== null && trip?.waitlist_start_day !== undefined && trip?.waitlist_start_time;
+  if (!hasSchedule) return false;
+
+  const endAt = trip?.waitlist_end_at;
+  if (!endAt) return false;
+
+  const endDt = new Date(endAt);
+  if (Number.isNaN(endDt.getTime())) return false;
+  return Date.now() < endDt.getTime();
+}
+
 function isWaitlistWindowActiveLegacy(waitlistStartAt, waitlistEndAt) {
   if (!waitlistStartAt) return false;
   const startDt = new Date(waitlistStartAt);
@@ -108,6 +120,10 @@ function isWaitlistWindowActiveBySchedule(startDay, startTime, endDay, endTime) 
 
 function isWaitlistWindowActive(trip) {
   if (!trip || typeof trip !== "object") return false;
+
+  if (isWaitlistTemporarilySuppressed(trip)) {
+    return false;
+  }
 
   if (trip.waitlist_start_day !== null && trip.waitlist_start_day !== undefined && trip.waitlist_start_time) {
     return isWaitlistWindowActiveBySchedule(

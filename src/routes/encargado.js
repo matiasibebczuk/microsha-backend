@@ -113,12 +113,48 @@ function groupPassengersByStop(passengers, timeMap) {
 async function getTripById(tripId) {
   const { data, error } = await supabase
     .from("trips")
-    .select("id, status")
+    .select("id, status, waitlist_start_day, waitlist_start_time")
     .eq("id", tripId)
     .maybeSingle();
 
   if (error) throw error;
   return data;
+}
+
+function parseTimeToMinutes(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+
+  const hh = Number(match[1]);
+  const mm = Number(match[2]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) {
+    return null;
+  }
+
+  return hh * 60 + mm;
+}
+
+function getNextScheduleActivationIso(startDay, startTime) {
+  const day = Number(startDay);
+  const minutes = parseTimeToMinutes(startTime);
+  if (!Number.isInteger(day) || day < 0 || day > 6 || minutes === null) {
+    return null;
+  }
+
+  const now = new Date();
+  const candidate = new Date(now);
+  candidate.setHours(0, 0, 0, 0);
+
+  const dayDelta = (day - candidate.getDay() + 7) % 7;
+  candidate.setDate(candidate.getDate() + dayDelta);
+  candidate.setMinutes(minutes);
+
+  if (candidate.getTime() <= now.getTime()) {
+    candidate.setDate(candidate.getDate() + 7);
+  }
+
+  return candidate.toISOString();
 }
 
 async function cleanupForcedReinforcementAfterFinish(parentTripId) {
@@ -521,6 +557,21 @@ router.post("/trips/:tripId/finish", async (req, res) => {
     }
 
     await cleanupForcedReinforcementAfterFinish(tripId);
+
+    const hasWaitlistSchedule = trip.waitlist_start_day !== null && trip.waitlist_start_day !== undefined && trip.waitlist_start_time;
+    if (hasWaitlistSchedule) {
+      const suspendUntil = getNextScheduleActivationIso(trip.waitlist_start_day, trip.waitlist_start_time);
+      if (suspendUntil) {
+        const { error: waitlistPauseError } = await supabase
+          .from("trips")
+          .update({ waitlist_end_at: suspendUntil })
+          .eq("id", tripId);
+
+        if (waitlistPauseError) {
+          return res.status(500).json({ error: waitlistPauseError.message });
+        }
+      }
+    }
 
     return res.json({
       success: true,
