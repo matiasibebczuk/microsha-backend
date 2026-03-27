@@ -280,6 +280,7 @@ router.get("/", async (req, res) => {
             waitlist_start_time: waitlistRange.startTime,
             waitlist_end_day: waitlistRange.endDay,
             waitlist_end_time: waitlistRange.endTime,
+            waitlist_active: waitlistActive,
           };
         });
 
@@ -417,6 +418,7 @@ router.get("/", async (req, res) => {
         waitlist_start_time: trip.waitlist_start_time || null,
         waitlist_end_day: trip.waitlist_end_day ?? null,
         waitlist_end_time: trip.waitlist_end_time || null,
+        waitlist_active: waitlistActive,
       };
     });
 
