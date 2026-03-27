@@ -2,7 +2,8 @@ const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 const { requirePassengerSession } = require("../middleware/passengerSession");
 const { getPassengerGroupId } = require("../middleware/groupAccess");
-const { getTripGroupId } = require("../middleware/groupStore");
+const { getTripGroupId, assignTripToGroup } = require("../middleware/groupStore");
+const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
 
 const router = express.Router();
 
@@ -27,7 +28,7 @@ async function getTripCapacity(tripId) {
 async function getTripStatus(tripId) {
   const { data, error } = await supabase
     .from("trips")
-    .select("status, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
+    .select("name, type, status, departure_datetime, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
     .eq("id", tripId)
     .maybeSingle();
 
@@ -129,6 +130,190 @@ function buildNotificationScheduleFromDate(baseDate) {
     confirm_notify_after: notifyAfter.toISOString(),
     confirm_notified_at: null,
   };
+}
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+async function autoActivateReinforcementIfNeeded({ tripId, trip, groupId }) {
+  if (!tripId || !groupId) return null;
+
+  const { data: config, error: configError } = await supabase
+    .from("trip_reinforcement_configs")
+    .select("parent_trip_id, active_reinforcement_trip_id, split_stop_ids, reinforcement_trip_name, reinforcement_bus_name, reinforcement_bus_capacity")
+    .eq("parent_trip_id", tripId)
+    .maybeSingle();
+
+  if (configError) throw configError;
+  if (!config) return null;
+  if (config.active_reinforcement_trip_id) return config.active_reinforcement_trip_id;
+
+  const splitStopIds = parseJsonArray(config.split_stop_ids)
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id));
+
+  if (splitStopIds.length === 0) return null;
+
+  const { data: parentStopsRows, error: parentStopsError } = await supabase
+    .from("trip_stops")
+    .select("stop_id, pickup_time, order_index")
+    .eq("trip_id", tripId)
+    .order("order_index", { ascending: true });
+
+  if (parentStopsError) throw parentStopsError;
+
+  const parentStops = Array.isArray(parentStopsRows) ? parentStopsRows : [];
+  if (parentStops.length < 2) return null;
+
+  const selectedSet = new Set(splitStopIds.map((id) => String(id)));
+  const selectedStops = parentStops.filter((row) => selectedSet.has(String(row.stop_id)));
+  const remainingStops = parentStops.filter((row) => !selectedSet.has(String(row.stop_id)));
+
+  if (selectedStops.length === 0 || remainingStops.length === 0) return null;
+
+  const reinforcementTripName = String(config.reinforcement_trip_name || "").trim() || `${trip.name || "Traslado"} Refuerzo`;
+  const reinforcementBusName = String(config.reinforcement_bus_name || "").trim() || "Refuerzo 1";
+  const reinforcementBusCapacity = Number(config.reinforcement_bus_capacity || 0);
+  if (!reinforcementBusCapacity || reinforcementBusCapacity <= 0) return null;
+
+  const [confirmedResult, waitingResult, capacityRows] = await Promise.all([
+    supabase
+      .from("reservations")
+      .select("*", { count: "exact", head: true })
+      .eq("trip_id", tripId)
+      .eq("status", "confirmed"),
+    supabase
+      .from("reservations")
+      .select("*", { count: "exact", head: true })
+      .eq("trip_id", tripId)
+      .eq("status", "waiting"),
+    supabase
+      .from("trip_buses")
+      .select("buses ( capacity )")
+      .eq("trip_id", tripId),
+  ]);
+
+  if (confirmedResult.error) throw confirmedResult.error;
+  if (waitingResult.error) throw waitingResult.error;
+  if (capacityRows.error) throw capacityRows.error;
+  const parentCapacity = (capacityRows.data || []).reduce((sum, row) => sum + Number(row?.buses?.capacity || 0), 0);
+  const confirmedCount = confirmedResult.count || 0;
+  const waitingCount = waitingResult.count || 0;
+
+  const { data: createdTrip, error: createTripError } = await supabase
+    .from("trips")
+    .insert({
+      name: reinforcementTripName,
+      type: trip.type,
+      status: trip.status,
+      departure_datetime: trip.departure_datetime || null,
+      waitlist_start_at: trip.waitlist_start_at || null,
+      waitlist_end_at: trip.waitlist_end_at || null,
+      waitlist_start_day: trip.waitlist_start_day ?? null,
+      waitlist_start_time: trip.waitlist_start_time || null,
+      waitlist_end_day: trip.waitlist_end_day ?? null,
+      waitlist_end_time: trip.waitlist_end_time || null,
+    })
+    .select("id")
+    .single();
+
+  if (createTripError) throw createTripError;
+  await assignTripToGroup(createdTrip.id, groupId);
+
+  const { data: createdBus, error: createBusError } = await supabase
+    .from("buses")
+    .insert({ name: reinforcementBusName, capacity: reinforcementBusCapacity, active: true })
+    .select("id")
+    .single();
+
+  if (createBusError) throw createBusError;
+
+  const { error: linkBusError } = await supabase
+    .from("trip_buses")
+    .insert({ trip_id: createdTrip.id, bus_id: createdBus.id });
+  if (linkBusError) throw linkBusError;
+
+  const { error: insertStopsError } = await supabase
+    .from("trip_stops")
+    .insert(selectedStops.map((row, index) => ({
+      trip_id: createdTrip.id,
+      stop_id: row.stop_id,
+      pickup_time: row.pickup_time,
+      order_index: index + 1,
+    })));
+  if (insertStopsError) throw insertStopsError;
+
+  const { data: reservationsToMove, error: reservationsToMoveError } = await supabase
+    .from("reservations")
+    .select("id")
+    .eq("trip_id", tripId)
+    .in("stop_id", selectedStops.map((row) => row.stop_id));
+  if (reservationsToMoveError) throw reservationsToMoveError;
+
+  const reservationIdsToMove = (reservationsToMove || []).map((row) => row.id).filter(Boolean);
+  if (reservationIdsToMove.length > 0) {
+    const { error: moveReservationsError } = await supabase
+      .from("reservations")
+      .update({ trip_id: createdTrip.id })
+      .in("id", reservationIdsToMove);
+    if (moveReservationsError) throw moveReservationsError;
+  }
+
+  const parentStopsSnapshot = parentStops.map((row) => ({
+    stop_id: row.stop_id,
+    pickup_time: row.pickup_time,
+    order_index: row.order_index,
+  }));
+
+  const { error: clearParentStopsError } = await supabase
+    .from("trip_stops")
+    .delete()
+    .eq("trip_id", tripId);
+  if (clearParentStopsError) throw clearParentStopsError;
+
+  const { error: restoreParentStopsError } = await supabase
+    .from("trip_stops")
+    .insert(remainingStops.map((row, index) => ({
+      trip_id: tripId,
+      stop_id: row.stop_id,
+      pickup_time: row.pickup_time,
+      order_index: index + 1,
+    })));
+  if (restoreParentStopsError) throw restoreParentStopsError;
+
+  const { error: activateConfigError } = await supabase
+    .from("trip_reinforcement_configs")
+    .update({
+      active_reinforcement_trip_id: createdTrip.id,
+      parent_stops_snapshot: JSON.stringify(parentStopsSnapshot),
+    })
+    .eq("parent_trip_id", tripId);
+  if (activateConfigError) throw activateConfigError;
+
+  try {
+    await notifyAdminsReinforcementActivated({
+      groupId,
+      tripName: trip.name || `Traslado ${tripId}`,
+      reinforcementTripName,
+      capacity: parentCapacity,
+      confirmed: confirmedCount || 0,
+      waiting: waitingCount || 0,
+    });
+  } catch (notifyError) {
+    console.error("⚠️ AUTO REINFORCEMENT EMAIL ALERT ERROR:", notifyError);
+  }
+
+  return createdTrip.id;
 }
 
 async function promoteWaitingPassengersIfNeeded(tripId) {
@@ -280,12 +465,21 @@ router.post("/", requirePassengerSession, async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
 
     let autoPromotedCount = 0;
+    let autoReinforcementTripId = null;
+    if (!forceWaiting && !hasSeats) {
+      autoReinforcementTripId = await autoActivateReinforcementIfNeeded({
+        tripId,
+        trip,
+        groupId: tripGroupId,
+      });
+    }
+
     if (trip.status === "open") {
       const promotionResult = await promoteWaitingPassengersIfNeeded(tripId);
       autoPromotedCount = promotionResult.promotedCount || 0;
     }
 
-    res.json({ status, autoPromotedCount });
+    res.json({ status, autoPromotedCount, autoReinforcementTripId });
 
   } catch (err) {
     console.error("🔥 RESERVATION ERROR:", err);

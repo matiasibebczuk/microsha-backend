@@ -1067,6 +1067,101 @@ router.get("/:id/reinforcement-config", auth, requireRole("admin"), requireStaff
 });
 
 // ========================
+// PUT /trips/:id/reinforcement-config
+// body: { reinforcement_trip_name, reinforcement_bus_name, reinforcement_bus_capacity, split_stop_ids: [] }
+// ========================
+router.put("/:id/reinforcement-config", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
+  try {
+    const tripId = req.params.id;
+    const {
+      reinforcement_trip_name,
+      reinforcement_bus_name,
+      reinforcement_bus_capacity,
+      split_stop_ids,
+      split_order_indexes,
+    } = req.body || {};
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const tripName = String(reinforcement_trip_name || "").trim();
+    const busName = String(reinforcement_bus_name || "").trim();
+    const busCapacity = Number(reinforcement_bus_capacity || 0);
+    const splitStopIds = Array.isArray(split_stop_ids)
+      ? split_stop_ids.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+      : [];
+    const splitOrderIndexes = Array.isArray(split_order_indexes)
+      ? split_order_indexes.map((idx) => Number(idx)).filter((idx) => Number.isFinite(idx) && idx > 0)
+      : [];
+
+    if (!tripName) return res.status(400).json({ error: "Nombre de refuerzo requerido" });
+    if (!busName) return res.status(400).json({ error: "Nombre de vehículo requerido" });
+    if (!Number.isFinite(busCapacity) || busCapacity <= 0) {
+      return res.status(400).json({ error: "Capacidad de vehículo inválida" });
+    }
+    if (splitStopIds.length === 0 && splitOrderIndexes.length === 0) {
+      return res.status(400).json({ error: "Seleccioná al menos una parada para refuerzo" });
+    }
+
+    const { data: stopsRows, error: stopsError } = await supabase
+      .from("trip_stops")
+      .select("stop_id, order_index")
+      .eq("trip_id", tripId);
+
+    if (stopsError) return res.status(500).json({ error: stopsError.message });
+
+    const availableIds = new Set((stopsRows || []).map((row) => Number(row.stop_id)));
+    const orderToStopId = new Map((stopsRows || []).map((row) => [Number(row.order_index), Number(row.stop_id)]));
+    const splitIdsFromOrder = splitOrderIndexes
+      .map((idx) => orderToStopId.get(idx))
+      .filter((id) => Number.isFinite(id));
+
+    const validSplitIds = Array.from(new Set([...splitStopIds, ...splitIdsFromOrder]))
+      .filter((id) => availableIds.has(id));
+
+    if (validSplitIds.length === 0) {
+      return res.status(400).json({ error: "Paradas inválidas para este traslado" });
+    }
+
+    if (validSplitIds.length === availableIds.size) {
+      return res.status(400).json({ error: "Debe quedar al menos una parada en el traslado principal" });
+    }
+
+    const { data: currentConfig, error: currentConfigError } = await supabase
+      .from("trip_reinforcement_configs")
+      .select("active_reinforcement_trip_id")
+      .eq("parent_trip_id", tripId)
+      .maybeSingle();
+
+    if (currentConfigError) return res.status(500).json({ error: currentConfigError.message });
+    if (currentConfig?.active_reinforcement_trip_id) {
+      return res.status(400).json({ error: "No podés editar configuración con un refuerzo activo" });
+    }
+
+    const { error: upsertError } = await supabase
+      .from("trip_reinforcement_configs")
+      .upsert({
+        parent_trip_id: tripId,
+        active_reinforcement_trip_id: null,
+        parent_stops_snapshot: null,
+        split_stop_ids: JSON.stringify(validSplitIds),
+        reinforcement_trip_name: tripName,
+        reinforcement_bus_name: busName,
+        reinforcement_bus_capacity: busCapacity,
+      }, { onConflict: "parent_trip_id" });
+
+    if (upsertError) return res.status(500).json({ error: upsertError.message });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("🔥 SAVE REINFORCEMENT CONFIG ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+// ========================
 // POST /trips/:id/reinforcement
 // body: { name, bus_name, bus_capacity, stop_ids: [] }
 // ========================
