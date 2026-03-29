@@ -87,16 +87,21 @@ router.get("/sanctions", async (req, res) => {
 
     const { data, error } = await supabase
       .from("users")
-      .select("id, name, dni, member_number, phone, suspended_until, suspension_reason, suspension_origin, suspension_created_at")
+      .select("id, name, role, dni, member_number, phone, suspended_until, suspension_reason, suspension_origin, suspension_created_at")
       .or(`group_number.eq.${safeGroupId},organization_id.eq.${safeGroupId}`)
-      .eq("role", "passenger")
       .not("suspended_until", "is", null)
       .gt("suspended_until", nowIso)
       .order("suspended_until", { ascending: true })
       .limit(500);
 
     if (error) return res.status(500).json({ error: error.message });
-    return res.json(Array.isArray(data) ? data : []);
+
+    const rows = (Array.isArray(data) ? data : []).filter((row) => {
+      const role = String(row?.role || "").trim().toLowerCase();
+      return role !== "admin" && role !== "encargado";
+    });
+
+    return res.json(rows);
   } catch (err) {
     console.error("🔥 ADMIN SANCTIONS LIST ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
@@ -114,8 +119,7 @@ router.get("/sanctions/search", async (req, res) => {
 
     const { data, error } = await supabase
       .from("users")
-      .select("id, name, dni, member_number, phone, no_show_streak, suspended_until, suspension_reason, group_number, organization_id")
-      .eq("role", "passenger")
+      .select("id, name, role, dni, member_number, phone, no_show_streak, suspended_until, suspension_reason, group_number, organization_id")
       .or(`name.ilike.%${safeQ}%,dni.ilike.%${safeQ}%,member_number.ilike.%${safeQ}%`)
       .order("name", { ascending: true })
       .limit(200);
@@ -125,7 +129,9 @@ router.get("/sanctions/search", async (req, res) => {
     const rows = (Array.isArray(data) ? data : [])
       .filter((row) => {
         const groupId = String(row?.group_number ?? row?.organization_id ?? "").trim();
-        return groupId && groupId === expectedGroupId;
+        if (!groupId || groupId !== expectedGroupId) return false;
+        const role = String(row?.role || "").trim().toLowerCase();
+        return role !== "admin" && role !== "encargado";
       })
       .slice(0, 50)
       .map((row) => ({
@@ -163,8 +169,9 @@ router.post("/sanctions", async (req, res) => {
       .maybeSingle();
 
     if (userError) return res.status(500).json({ error: userError.message });
+    const role = String(user?.role || "").trim().toLowerCase();
     const userGroup = String(user?.group_number ?? user?.organization_id ?? "");
-    if (!user || user.role !== "passenger" || userGroup !== String(req.groupId || "")) {
+    if (!user || role === "admin" || role === "encargado" || userGroup !== String(req.groupId || "")) {
       return res.status(404).json({ error: "Pasajero no encontrado" });
     }
 
@@ -206,8 +213,9 @@ router.delete("/sanctions/:userId", async (req, res) => {
       .maybeSingle();
 
     if (userError) return res.status(500).json({ error: userError.message });
+    const role = String(user?.role || "").trim().toLowerCase();
     const userGroup = String(user?.group_number ?? user?.organization_id ?? "");
-    if (!user || user.role !== "passenger" || userGroup !== String(req.groupId || "")) {
+    if (!user || role === "admin" || role === "encargado" || userGroup !== String(req.groupId || "")) {
       return res.status(404).json({ error: "Pasajero no encontrado" });
     }
 
