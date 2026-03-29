@@ -83,11 +83,12 @@ router.put("/system/flags", async (req, res) => {
 router.get("/sanctions", async (req, res) => {
   try {
     const nowIso = new Date().toISOString();
+    const safeGroupId = String(req.groupId || "").replace(/,/g, "");
 
     const { data, error } = await supabase
       .from("users")
       .select("id, name, dni, member_number, phone, suspended_until, suspension_reason, suspension_origin, suspension_created_at")
-      .eq("group_id", req.groupId)
+      .or(`group_number.eq.${safeGroupId},organization_id.eq.${safeGroupId}`)
       .eq("role", "passenger")
       .not("suspended_until", "is", null)
       .gt("suspended_until", nowIso)
@@ -108,12 +109,13 @@ router.get("/sanctions/search", async (req, res) => {
     if (!q) return res.json([]);
 
     const safeQ = q.replace(/[%_]/g, "");
+    const safeGroupId = String(req.groupId || "").replace(/,/g, "");
     const nowIso = new Date().toISOString();
 
     const { data, error } = await supabase
       .from("users")
       .select("id, name, dni, member_number, phone, no_show_streak, suspended_until, suspension_reason")
-      .eq("group_id", req.groupId)
+      .or(`group_number.eq.${safeGroupId},organization_id.eq.${safeGroupId}`)
       .eq("role", "passenger")
       .or(`name.ilike.%${safeQ}%,dni.ilike.%${safeQ}%,member_number.ilike.%${safeQ}%`)
       .order("name", { ascending: true })
@@ -151,12 +153,13 @@ router.post("/sanctions", async (req, res) => {
 
     const { data: user, error: userError } = await supabase
       .from("users")
-      .select("id, role, group_id")
+      .select("id, role, group_number, organization_id")
       .eq("id", userId)
       .maybeSingle();
 
     if (userError) return res.status(500).json({ error: userError.message });
-    if (!user || user.role !== "passenger" || String(user.group_id || "") !== String(req.groupId || "")) {
+    const userGroup = String(user?.group_number ?? user?.organization_id ?? "");
+    if (!user || user.role !== "passenger" || userGroup !== String(req.groupId || "")) {
       return res.status(404).json({ error: "Pasajero no encontrado" });
     }
 
@@ -193,12 +196,13 @@ router.delete("/sanctions/:userId", async (req, res) => {
 
     const { data: user, error: userError } = await supabase
       .from("users")
-      .select("id, role, group_id")
+      .select("id, role, group_number, organization_id")
       .eq("id", userId)
       .maybeSingle();
 
     if (userError) return res.status(500).json({ error: userError.message });
-    if (!user || user.role !== "passenger" || String(user.group_id || "") !== String(req.groupId || "")) {
+    const userGroup = String(user?.group_number ?? user?.organization_id ?? "");
+    if (!user || user.role !== "passenger" || userGroup !== String(req.groupId || "")) {
       return res.status(404).json({ error: "Pasajero no encontrado" });
     }
 
