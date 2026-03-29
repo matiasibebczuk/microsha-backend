@@ -457,8 +457,8 @@ router.post("/", requirePassengerSession, async (req, res) => {
     const capacity = await getTripCapacity(tripId);
     const hasSeats = (confirmed || 0) < capacity;
 
-    const forceWaiting = isWaitlistWindowActive(trip);
-    const status = forceWaiting ? "waiting" : hasSeats ? "confirmed" : "waiting";
+    const waitlistWindowActive = isWaitlistWindowActive(trip);
+    const status = hasSeats ? "confirmed" : "waiting";
 
     const { error } = await supabase
       .from("reservations")
@@ -473,7 +473,7 @@ router.post("/", requirePassengerSession, async (req, res) => {
 
     let autoPromotedCount = 0;
     let autoReinforcementTripId = null;
-    if (!forceWaiting && !hasSeats) {
+    if (!waitlistWindowActive && !hasSeats) {
       autoReinforcementTripId = await autoActivateReinforcementIfNeeded({
         tripId,
         trip,
@@ -486,7 +486,13 @@ router.post("/", requirePassengerSession, async (req, res) => {
       autoPromotedCount = promotionResult.promotedCount || 0;
     }
 
-    res.json({ status, autoPromotedCount, autoReinforcementTripId });
+    res.json({
+      status,
+      autoPromotedCount,
+      autoReinforcementTripId,
+      waitlistWindowActive,
+      irregularByWaitlist: waitlistWindowActive && status === "confirmed",
+    });
 
   } catch (err) {
     console.error("🔥 RESERVATION ERROR:", err);
