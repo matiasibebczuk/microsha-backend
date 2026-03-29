@@ -83,12 +83,11 @@ router.put("/system/flags", async (req, res) => {
 router.get("/sanctions", async (req, res) => {
   try {
     const nowIso = new Date().toISOString();
-    const safeGroupId = String(req.groupId || "").replace(/,/g, "");
+    const expectedGroupId = String(req.groupId || "").trim();
 
     const { data, error } = await supabase
       .from("users")
-      .select("id, name, role, dni, member_number, phone, suspended_until, suspension_reason, suspension_origin, suspension_created_at")
-      .or(`group_number.eq.${safeGroupId},organization_id.eq.${safeGroupId}`)
+      .select("id, name, role, dni, member_number, phone, group_number, organization_id, suspended_until, suspension_reason, suspension_origin, suspension_created_at")
       .not("suspended_until", "is", null)
       .gt("suspended_until", nowIso)
       .order("suspended_until", { ascending: true })
@@ -98,7 +97,12 @@ router.get("/sanctions", async (req, res) => {
 
     const rows = (Array.isArray(data) ? data : []).filter((row) => {
       const role = String(row?.role || "").trim().toLowerCase();
-      return role !== "admin" && role !== "encargado";
+      if (role === "admin" || role === "encargado") return false;
+
+      const groupId = String(row?.group_number ?? row?.organization_id ?? "").trim();
+      // Some legacy users have empty group fields; allow them so sanctions search remains usable.
+      if (!groupId) return true;
+      return groupId === expectedGroupId;
     });
 
     return res.json(rows);
@@ -129,7 +133,7 @@ router.get("/sanctions/search", async (req, res) => {
     const rows = (Array.isArray(data) ? data : [])
       .filter((row) => {
         const groupId = String(row?.group_number ?? row?.organization_id ?? "").trim();
-        if (!groupId || groupId !== expectedGroupId) return false;
+        if (groupId && groupId !== expectedGroupId) return false;
         const role = String(row?.role || "").trim().toLowerCase();
         return role !== "admin" && role !== "encargado";
       })
@@ -170,8 +174,9 @@ router.post("/sanctions", async (req, res) => {
 
     if (userError) return res.status(500).json({ error: userError.message });
     const role = String(user?.role || "").trim().toLowerCase();
-    const userGroup = String(user?.group_number ?? user?.organization_id ?? "");
-    if (!user || role === "admin" || role === "encargado" || userGroup !== String(req.groupId || "")) {
+    const userGroup = String(user?.group_number ?? user?.organization_id ?? "").trim();
+    const expectedGroupId = String(req.groupId || "").trim();
+    if (!user || role === "admin" || role === "encargado" || (userGroup && userGroup !== expectedGroupId)) {
       return res.status(404).json({ error: "Pasajero no encontrado" });
     }
 
@@ -214,8 +219,9 @@ router.delete("/sanctions/:userId", async (req, res) => {
 
     if (userError) return res.status(500).json({ error: userError.message });
     const role = String(user?.role || "").trim().toLowerCase();
-    const userGroup = String(user?.group_number ?? user?.organization_id ?? "");
-    if (!user || role === "admin" || role === "encargado" || userGroup !== String(req.groupId || "")) {
+    const userGroup = String(user?.group_number ?? user?.organization_id ?? "").trim();
+    const expectedGroupId = String(req.groupId || "").trim();
+    if (!user || role === "admin" || role === "encargado" || (userGroup && userGroup !== expectedGroupId)) {
       return res.status(404).json({ error: "Pasajero no encontrado" });
     }
 
