@@ -185,10 +185,14 @@ router.post("/passenger-login", async (req, res) => {
     }
 
     if (user?.suspended_until && new Date(user.suspended_until).getTime() > Date.now()) {
+      const untilLabel = new Date(user.suspended_until).toLocaleString("es-AR", {
+        timeZone: "America/Argentina/Buenos_Aires",
+      });
+      const reasonLabel = user.suspension_reason || "2 faltas seguidas";
       return res.status(403).json({
-        error: "Cuenta suspendida temporalmente",
+        error: `Cuenta sancionada hasta ${untilLabel} por ${reasonLabel}`,
         suspendedUntil: user.suspended_until,
-        reason: user.suspension_reason || "Sanción activa",
+        reason: reasonLabel,
       });
     }
 

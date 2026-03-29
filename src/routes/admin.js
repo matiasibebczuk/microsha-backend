@@ -47,6 +47,48 @@ function profileDisplayName(profile, fallback = null) {
   return fullName || profile.name || profile.lastname || safeFallback;
 }
 
+function authUserDisplayName(authUser, fallback = "Sin nombre") {
+  const name = String(authUser?.user_metadata?.name || authUser?.raw_user_meta_data?.name || "").trim();
+  const lastname = String(authUser?.user_metadata?.lastname || authUser?.raw_user_meta_data?.lastname || "").trim();
+  const email = String(authUser?.email || "").trim();
+  const fullName = [name, lastname].filter(Boolean).join(" ").trim();
+  if (fullName) return fullName;
+  if (name) return name;
+  if (email) return email;
+  return fallback;
+}
+
+async function resolveControllerName(takenBy) {
+  const id = String(takenBy || "").trim();
+  if (!id) return "Sin nombre";
+
+  const { data: profileData, error: profileError } = await supabase
+    .from("profiles")
+    .select("id, name, lastname")
+    .eq("id", id)
+    .maybeSingle();
+  if (!profileError) {
+    const profileName = profileDisplayName(profileData, "");
+    if (profileName && profileName !== "Sin nombre") return profileName;
+  }
+
+  const { data: byAuthUser, error: byAuthError } = await supabase
+    .from("users")
+    .select("name")
+    .eq("auth_user_id", id)
+    .maybeSingle();
+  if (!byAuthError && String(byAuthUser?.name || "").trim()) {
+    return String(byAuthUser.name).trim();
+  }
+
+  const { data: authData, error: authError } = await supabase.auth.admin.getUserById(id);
+  if (!authError && authData?.user) {
+    return authUserDisplayName(authData.user, "Sin nombre");
+  }
+
+  return "Sin nombre";
+}
+
 router.get("/system/flags", async (req, res) => {
   try {
     const flags = await getSystemFlags();
@@ -154,11 +196,11 @@ router.get("/sanctions/search", async (req, res) => {
 
 router.post("/sanctions", async (req, res) => {
   try {
-    const userId = Number(req.body?.userId);
+    const userId = String(req.body?.userId || "").trim();
     const days = Number(req.body?.days || 7);
     const reason = String(req.body?.reason || "Sanción manual").trim() || "Sanción manual";
 
-    if (!Number.isFinite(userId)) {
+    if (!userId) {
       return res.status(400).json({ error: "userId inválido" });
     }
 
@@ -206,8 +248,8 @@ router.post("/sanctions", async (req, res) => {
 
 router.delete("/sanctions/:userId", async (req, res) => {
   try {
-    const userId = Number(req.params.userId);
-    if (!Number.isFinite(userId)) {
+    const userId = String(req.params.userId || "").trim();
+    if (!userId) {
       return res.status(400).json({ error: "userId inválido" });
     }
 
@@ -409,21 +451,9 @@ router.get("/history", async (req, res) => {
       }, {});
     }
 
-    let profilesMap = {};
-    if (profileIds.length > 0) {
-      const { data: profiles, error: profilesError } = await supabase
-        .from("profiles")
-        .select("id, name, lastname")
-        .in("id", profileIds);
-
-      if (profilesError) {
-        return res.status(500).json({ error: profilesError.message });
-      }
-
-      profilesMap = (profiles || []).reduce((acc, profile) => {
-        acc[profile.id] = profile;
-        return acc;
-      }, {});
+    const controllerNameMap = {};
+    for (const controllerId of profileIds) {
+      controllerNameMap[controllerId] = await resolveControllerName(controllerId);
     }
 
     const result = (runs || []).map((run) => ({
@@ -431,8 +461,8 @@ router.get("/history", async (req, res) => {
       trip_name: tripsMap[run.trip_id]?.name || null,
       trip_type: tripsMap[run.trip_id]?.type || null,
       trip_departure_datetime: tripsMap[run.trip_id]?.departure_datetime || null,
-      started_by_name: profileDisplayName(profilesMap[run.taken_by], "Sin nombre"),
-      finished_by_name: profileDisplayName(profilesMap[run.taken_by], "Sin nombre"),
+      started_by_name: controllerNameMap[String(run.taken_by || "")] || "Sin nombre",
+      finished_by_name: controllerNameMap[String(run.taken_by || "")] || "Sin nombre",
     }));
 
     res.json(result);
@@ -480,20 +510,7 @@ router.get("/history/:runId", async (req, res) => {
       trip = tripData || null;
     }
 
-    let runControllerName = "Sin nombre";
-    if (run?.taken_by) {
-      const { data: profileData, error: profileError } = await supabase
-        .from("profiles")
-        .select("id, name, lastname")
-        .eq("id", run.taken_by)
-        .maybeSingle();
-
-      if (profileError) {
-        return res.status(500).json({ error: profileError.message });
-      }
-
-      runControllerName = profileDisplayName(profileData, "Sin nombre");
-    }
+    const runControllerName = await resolveControllerName(run?.taken_by);
 
     const { data, error } = await supabase
       .from("trip_run_passengers")
