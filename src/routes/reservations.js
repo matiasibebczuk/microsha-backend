@@ -4,6 +4,7 @@ const { requirePassengerSession } = require("../middleware/passengerSession");
 const { getPassengerGroupId } = require("../middleware/groupAccess");
 const { getTripGroupId, assignTripToGroup } = require("../middleware/groupStore");
 const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
+const { getSystemFlags } = require("../services/systemFlags");
 
 const router = express.Router();
 
@@ -23,6 +24,14 @@ async function getTripCapacity(tripId) {
   return (
     data?.reduce((sum, row) => sum + (row.buses?.capacity || 0), 0) || 0
   );
+}
+
+async function getPauseState() {
+  const flags = await getSystemFlags();
+  return {
+    paused: Boolean(flags?.tripsPaused),
+    message: String(flags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
+  };
 }
 
 async function getTripStatus(tripId) {
@@ -404,6 +413,11 @@ async function promoteWaitingPassengersIfNeeded(tripId) {
 // ========================
 router.post("/", requirePassengerSession, async (req, res) => {
   try {
+    const pauseState = await getPauseState();
+    if (pauseState.paused) {
+      return res.status(503).json({ error: pauseState.message, paused: true });
+    }
+
     const { tripId, stopId } = req.body;
     const userId = req.passengerUserId;
 
@@ -573,6 +587,11 @@ router.delete("/", requirePassengerSession, async (req, res) => {
 // ========================
 router.put("/change", requirePassengerSession, async (req, res) => {
   try {
+    const pauseState = await getPauseState();
+    if (pauseState.paused) {
+      return res.status(503).json({ error: pauseState.message, paused: true });
+    }
+
     const { tripId, stopId } = req.body;
     const userId = req.passengerUserId;
 
@@ -845,6 +864,19 @@ router.get("/notifications", requirePassengerSession, async (req, res) => {
     return res.json(notifications);
   } catch (err) {
     console.error("🔥 RESERVATION NOTIFICATIONS ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.get("/system-status", requirePassengerSession, async (req, res) => {
+  try {
+    const pauseState = await getPauseState();
+    return res.json({
+      tripsPaused: pauseState.paused,
+      pauseMessage: pauseState.message,
+    });
+  } catch (err) {
+    console.error("🔥 RESERVATIONS SYSTEM STATUS ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
   }
 });

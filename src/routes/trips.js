@@ -15,6 +15,7 @@ const {
   getGroupPublicById,
 } = require("../middleware/groupStore");
 const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
+const { getSystemFlags } = require("../services/systemFlags");
 const {
   verifyPassengerToken,
   getPassengerTokenFromRequest,
@@ -95,6 +96,28 @@ function parseTimeToMinutes(value) {
   }
 
   return hh * 60 + mm;
+}
+
+function getNextScheduleActivationIso(startDay, startTime) {
+  const day = Number(startDay);
+  const minutes = parseTimeToMinutes(startTime);
+  if (!Number.isInteger(day) || day < 0 || day > 6 || minutes === null) {
+    return null;
+  }
+
+  const now = new Date();
+  const candidate = new Date(now);
+  candidate.setHours(0, 0, 0, 0);
+
+  const dayDelta = (day - candidate.getDay() + 7) % 7;
+  candidate.setDate(candidate.getDate() + dayDelta);
+  candidate.setMinutes(minutes);
+
+  if (candidate.getTime() <= now.getTime()) {
+    candidate.setDate(candidate.getDate() + 7);
+  }
+
+  return candidate.toISOString();
 }
 
 function isWaitlistTemporarilySuppressed(trip) {
@@ -204,6 +227,7 @@ function parseJsonArray(value) {
 // ========================
 router.get("/", async (req, res) => {
   try {
+    const systemFlags = await getSystemFlags();
     const context = await resolveRequestGroupId(req);
     if (!context.groupId) {
       return res.status(context.status || 401).json({ error: context.error || "No group context" });
@@ -324,6 +348,8 @@ router.get("/", async (req, res) => {
             waitlist_end_day: waitlistRange.endDay,
             waitlist_end_time: waitlistRange.endTime,
             waitlist_active: waitlistActive,
+            trips_paused: Boolean(systemFlags?.tripsPaused),
+            trips_pause_message: String(systemFlags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
           };
         });
 
@@ -462,6 +488,8 @@ router.get("/", async (req, res) => {
         waitlist_end_day: trip.waitlist_end_day ?? null,
         waitlist_end_time: trip.waitlist_end_time || null,
         waitlist_active: waitlistActive,
+        trips_paused: Boolean(systemFlags?.tripsPaused),
+        trips_pause_message: String(systemFlags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
       };
     });
 
@@ -573,6 +601,10 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
     }
     if (waitlist_end_time !== undefined) {
       payload.waitlist_end_time = waitlist_end_time || null;
+    }
+
+    if (payload.waitlist_start_day !== null && payload.waitlist_start_day !== undefined && payload.waitlist_start_time) {
+      payload.waitlist_end_at = getNextScheduleActivationIso(payload.waitlist_start_day, payload.waitlist_start_time);
     }
 
     const { data, error } = await supabase

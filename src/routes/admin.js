@@ -4,6 +4,7 @@ const auth = require("../middleware/auth");
 const { requireRole } = require("../middleware/roles");
 const { requireStaffGroup, assertTripInGroup } = require("../middleware/groupAccess");
 const { getTripIdsForGroup } = require("../middleware/groupStore");
+const { getSystemFlags, setSystemFlags } = require("../services/systemFlags");
 
 const router = express.Router();
 
@@ -35,6 +36,39 @@ async function getTripCapacity(tripId) {
 }
 
 router.use(auth, requireRole("admin"), requireStaffGroup);
+
+function profileDisplayName(profile, fallback = null) {
+  if (!profile) return fallback;
+  const fullName = [profile.name, profile.lastname].filter(Boolean).join(" ").trim();
+  return fullName || profile.name || profile.lastname || fallback;
+}
+
+router.get("/system/flags", async (req, res) => {
+  try {
+    const flags = await getSystemFlags();
+    return res.json(flags);
+  } catch (err) {
+    console.error("🔥 ADMIN FLAGS GET ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.put("/system/flags", async (req, res) => {
+  try {
+    const tripsPaused = req.body?.tripsPaused;
+    const pauseMessage = req.body?.pauseMessage;
+
+    const flags = await setSystemFlags({
+      ...(tripsPaused !== undefined ? { tripsPaused: Boolean(tripsPaused) } : {}),
+      ...(pauseMessage !== undefined ? { pauseMessage: String(pauseMessage || "").trim() || "En mantenimiento, prueba mas tarde" } : {}),
+    });
+
+    return res.json(flags);
+  } catch (err) {
+    console.error("🔥 ADMIN FLAGS PUT ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
 
 router.get("/trips/:tripId/reservations", async (req, res) => {
   try {
@@ -181,6 +215,7 @@ router.get("/history", async (req, res) => {
     }
 
     const tripIds = [...new Set((runs || []).map((r) => r.trip_id).filter(Boolean))];
+    const profileIds = [...new Set((runs || []).map((r) => r.taken_by).filter(Boolean))];
 
     let tripsMap = {};
     if (tripIds.length > 0) {
@@ -199,11 +234,30 @@ router.get("/history", async (req, res) => {
       }, {});
     }
 
+    let profilesMap = {};
+    if (profileIds.length > 0) {
+      const { data: profiles, error: profilesError } = await supabase
+        .from("profiles")
+        .select("id, name, lastname")
+        .in("id", profileIds);
+
+      if (profilesError) {
+        return res.status(500).json({ error: profilesError.message });
+      }
+
+      profilesMap = (profiles || []).reduce((acc, profile) => {
+        acc[profile.id] = profile;
+        return acc;
+      }, {});
+    }
+
     const result = (runs || []).map((run) => ({
       ...run,
       trip_name: tripsMap[run.trip_id]?.name || null,
       trip_type: tripsMap[run.trip_id]?.type || null,
       trip_departure_datetime: tripsMap[run.trip_id]?.departure_datetime || null,
+      started_by_name: profileDisplayName(profilesMap[run.taken_by], run.taken_by || null),
+      finished_by_name: profileDisplayName(profilesMap[run.taken_by], run.taken_by || null),
     }));
 
     res.json(result);
@@ -251,6 +305,21 @@ router.get("/history/:runId", async (req, res) => {
       trip = tripData || null;
     }
 
+    let runControllerName = run?.taken_by || null;
+    if (run?.taken_by) {
+      const { data: profileData, error: profileError } = await supabase
+        .from("profiles")
+        .select("id, name, lastname")
+        .eq("id", run.taken_by)
+        .maybeSingle();
+
+      if (profileError) {
+        return res.status(500).json({ error: profileError.message });
+      }
+
+      runControllerName = profileDisplayName(profileData, run.taken_by);
+    }
+
     const { data, error } = await supabase
       .from("trip_run_passengers")
       .select("*")
@@ -270,6 +339,8 @@ router.get("/history/:runId", async (req, res) => {
         trip_name: trip?.name || null,
         trip_type: trip?.type || null,
         trip_departure_datetime: trip?.departure_datetime || null,
+        started_by_name: runControllerName,
+        finished_by_name: runControllerName,
       },
       summary: {
         total: passengers.length,
