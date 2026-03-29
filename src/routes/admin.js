@@ -61,10 +61,16 @@ router.put("/system/flags", async (req, res) => {
   try {
     const tripsPaused = req.body?.tripsPaused;
     const pauseMessage = req.body?.pauseMessage;
+    const scheduledPauseEnabled = req.body?.scheduledPauseEnabled;
+    const scheduledPauseDay = req.body?.scheduledPauseDay;
+    const scheduledPauseTime = req.body?.scheduledPauseTime;
 
     const flags = await setSystemFlags({
       ...(tripsPaused !== undefined ? { tripsPaused: Boolean(tripsPaused) } : {}),
       ...(pauseMessage !== undefined ? { pauseMessage: String(pauseMessage || "").trim() || "En mantenimiento, prueba mas tarde" } : {}),
+      ...(scheduledPauseEnabled !== undefined ? { scheduledPauseEnabled: Boolean(scheduledPauseEnabled) } : {}),
+      ...(scheduledPauseDay !== undefined ? { scheduledPauseDay } : {}),
+      ...(scheduledPauseTime !== undefined ? { scheduledPauseTime } : {}),
     });
 
     return res.json(flags);
