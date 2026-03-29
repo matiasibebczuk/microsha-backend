@@ -85,6 +85,7 @@ router.get("/trips/:tripId/reservations", async (req, res) => {
       .select(`
         id,
         status,
+        waiting_promoted_at,
         user_id,
         trip_id,
         stop_id,
