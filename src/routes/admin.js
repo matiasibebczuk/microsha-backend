@@ -38,9 +38,13 @@ async function getTripCapacity(tripId) {
 router.use(auth, requireRole("admin"), requireStaffGroup);
 
 function profileDisplayName(profile, fallback = null) {
-  if (!profile) return fallback;
+  const normalizedFallback = String(fallback || "").trim();
+  const fallbackLooksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalizedFallback);
+  const safeFallback = normalizedFallback && !fallbackLooksLikeUuid ? normalizedFallback : "Sin nombre";
+
+  if (!profile) return safeFallback;
   const fullName = [profile.name, profile.lastname].filter(Boolean).join(" ").trim();
-  return fullName || profile.name || profile.lastname || fallback;
+  return fullName || profile.name || profile.lastname || safeFallback;
 }
 
 router.get("/system/flags", async (req, res) => {
@@ -257,8 +261,8 @@ router.get("/history", async (req, res) => {
       trip_name: tripsMap[run.trip_id]?.name || null,
       trip_type: tripsMap[run.trip_id]?.type || null,
       trip_departure_datetime: tripsMap[run.trip_id]?.departure_datetime || null,
-      started_by_name: profileDisplayName(profilesMap[run.taken_by], run.taken_by || null),
-      finished_by_name: profileDisplayName(profilesMap[run.taken_by], run.taken_by || null),
+      started_by_name: profileDisplayName(profilesMap[run.taken_by], "Sin nombre"),
+      finished_by_name: profileDisplayName(profilesMap[run.taken_by], "Sin nombre"),
     }));
 
     res.json(result);
@@ -306,7 +310,7 @@ router.get("/history/:runId", async (req, res) => {
       trip = tripData || null;
     }
 
-    let runControllerName = run?.taken_by || null;
+    let runControllerName = "Sin nombre";
     if (run?.taken_by) {
       const { data: profileData, error: profileError } = await supabase
         .from("profiles")
@@ -318,7 +322,7 @@ router.get("/history/:runId", async (req, res) => {
         return res.status(500).json({ error: profileError.message });
       }
 
-      runControllerName = profileDisplayName(profileData, run.taken_by);
+      runControllerName = profileDisplayName(profileData, "Sin nombre");
     }
 
     const { data, error } = await supabase
