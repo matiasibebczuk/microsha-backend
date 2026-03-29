@@ -5,6 +5,7 @@ const { getPassengerGroupId } = require("../middleware/groupAccess");
 const { getTripGroupId, assignTripToGroup } = require("../middleware/groupStore");
 const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
 const { getSystemFlags } = require("../services/systemFlags");
+const { isWaitlistWindowActiveBySchedule } = require("../utils/scheduleTime");
 
 const router = express.Router();
 
@@ -45,19 +46,6 @@ async function getTripStatus(tripId) {
   return data || null;
 }
 
-function parseTimeToMinutes(value) {
-  const text = String(value || "").trim();
-  const match = text.match(/^(\d{1,2}):(\d{2})/);
-  if (!match) return null;
-
-  const hh = Number(match[1]);
-  const mm = Number(match[2]);
-  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) {
-    return null;
-  }
-
-  return hh * 60 + mm;
-}
 
 function isWaitlistTemporarilySuppressed(trip) {
   const hasSchedule = trip?.waitlist_start_day !== null && trip?.waitlist_start_day !== undefined && trip?.waitlist_start_time;
@@ -84,47 +72,6 @@ function isWaitlistWindowActiveLegacy(waitlistStartAt, waitlistEndAt) {
   if (Number.isNaN(endDt.getTime())) return true;
 
   return now <= endDt.getTime();
-}
-
-function isWaitlistWindowActiveBySchedule(startDay, startTime, endDay, endTime) {
-  const normalizedStartDay = Number(startDay);
-  if (!Number.isInteger(normalizedStartDay) || normalizedStartDay < 0 || normalizedStartDay > 6) {
-    return false;
-  }
-
-  const startMinutes = parseTimeToMinutes(startTime);
-  if (startMinutes === null) return false;
-
-  const now = new Date();
-  const nowMs = now.getTime();
-
-  const startPoint = new Date(now);
-  startPoint.setHours(0, 0, 0, 0);
-  const daysSinceStart = (startPoint.getDay() - normalizedStartDay + 7) % 7;
-  startPoint.setDate(startPoint.getDate() - daysSinceStart);
-  startPoint.setMinutes(startMinutes);
-
-  if (startPoint.getTime() > nowMs) {
-    startPoint.setDate(startPoint.getDate() - 7);
-  }
-
-  const normalizedEndDay = Number(endDay);
-  const endMinutes = parseTimeToMinutes(endTime);
-  if (!Number.isInteger(normalizedEndDay) || normalizedEndDay < 0 || normalizedEndDay > 6 || endMinutes === null) {
-    return nowMs >= startPoint.getTime();
-  }
-
-  const daysDelta = (normalizedEndDay - normalizedStartDay + 7) % 7;
-  const endPoint = new Date(startPoint);
-  endPoint.setDate(endPoint.getDate() + daysDelta);
-  endPoint.setHours(0, 0, 0, 0);
-  endPoint.setMinutes(endMinutes);
-
-  if (daysDelta === 0 && endMinutes <= startMinutes) {
-    endPoint.setDate(endPoint.getDate() + 7);
-  }
-
-  return nowMs >= startPoint.getTime() && nowMs <= endPoint.getTime();
 }
 
 function isWaitlistWindowActive(trip) {
