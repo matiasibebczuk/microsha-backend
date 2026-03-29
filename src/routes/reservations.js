@@ -5,7 +5,7 @@ const { getPassengerGroupId } = require("../middleware/groupAccess");
 const { getTripGroupId, assignTripToGroup } = require("../middleware/groupStore");
 const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
 const { getSystemFlags } = require("../services/systemFlags");
-const { isWaitlistWindowActiveBySchedule } = require("../utils/scheduleTime");
+const { isWaitlistWindowActiveBySchedule, normalizeClockTime } = require("../utils/scheduleTime");
 
 const router = express.Router();
 
@@ -653,7 +653,7 @@ router.get("/mine", requirePassengerSession, async (req, res) => {
     const tripsMap = new Map((tripsResult.data || []).map((trip) => [String(trip.id), trip]));
     const stopsMap = new Map((stopsResult.data || []).map((stop) => [String(stop.id), stop]));
     const tripStopTimeMap = new Map(
-      (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, row.pickup_time || null])
+      (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, normalizeClockTime(row.pickup_time) || null])
     );
 
     const result = reservations.map((row) => {
@@ -779,7 +779,7 @@ router.get("/notifications", requirePassengerSession, async (req, res) => {
     const tripsMap = new Map((tripsResult.data || []).map((trip) => [String(trip.id), trip]));
     const stopsMap = new Map((stopsResult.data || []).map((stop) => [String(stop.id), stop]));
     const tripStopTimeMap = new Map(
-      (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, row.pickup_time || null])
+      (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, normalizeClockTime(row.pickup_time) || null])
     );
 
     const notifications = pending.map((reservation) => {

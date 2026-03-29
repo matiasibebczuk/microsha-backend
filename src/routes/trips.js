@@ -23,6 +23,7 @@ const {
 const {
   getNextScheduleActivationIso,
   isWaitlistWindowActiveBySchedule,
+  normalizeClockTime,
 } = require("../utils/scheduleTime");
 
 const router = express.Router();
@@ -226,9 +227,9 @@ router.get("/", async (req, res) => {
               start: row.waitlist_start_at || null,
               end: row.waitlist_end_at || null,
               startDay: row.waitlist_start_day ?? null,
-              startTime: row.waitlist_start_time || null,
+              startTime: normalizeClockTime(row.waitlist_start_time) || null,
               endDay: row.waitlist_end_day ?? null,
-              endTime: row.waitlist_end_time || null,
+              endTime: normalizeClockTime(row.waitlist_end_time) || null,
             },
           ])
         );
@@ -266,7 +267,7 @@ router.get("/", async (req, res) => {
             confirmed: row.confirmed || 0,
             waiting: row.waiting || 0,
             capacity: row.capacity || 0,
-            first_time: row.first_time || null,
+            first_time: normalizeClockTime(row.first_time) || null,
             active_started_at: row.active_started_at || null,
             last_finished_at: row.last_finished_at || null,
             waitlist_start_at: waitlistRange.start,
@@ -364,7 +365,7 @@ router.get("/", async (req, res) => {
     for (const row of firstStops) {
       const key = String(row.trip_id);
       if (!firstStopMap.has(key)) {
-        firstStopMap.set(key, row.pickup_time || null);
+        firstStopMap.set(key, normalizeClockTime(row.pickup_time) || null);
       }
     }
 
@@ -412,9 +413,9 @@ router.get("/", async (req, res) => {
         waitlist_start_at: trip.waitlist_start_at || null,
         waitlist_end_at: trip.waitlist_end_at || null,
         waitlist_start_day: trip.waitlist_start_day ?? null,
-        waitlist_start_time: trip.waitlist_start_time || null,
+        waitlist_start_time: normalizeClockTime(trip.waitlist_start_time) || null,
         waitlist_end_day: trip.waitlist_end_day ?? null,
-        waitlist_end_time: trip.waitlist_end_time || null,
+        waitlist_end_time: normalizeClockTime(trip.waitlist_end_time) || null,
         waitlist_active: waitlistActive,
         trips_paused: Boolean(systemFlags?.tripsPaused),
         trips_pause_message: String(systemFlags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
@@ -474,7 +475,7 @@ router.get("/:id/stops", async (req, res) => {
     const result = data.map(s => ({
       id: s.stop_id,
       name: s.stops.name,
-      time: s.pickup_time,
+      time: normalizeClockTime(s.pickup_time) || null,
       order: s.order_index
     }));
 
@@ -522,13 +523,13 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
       payload.waitlist_start_day = waitlist_start_day === null || waitlist_start_day === "" ? null : Number(waitlist_start_day);
     }
     if (waitlist_start_time !== undefined) {
-      payload.waitlist_start_time = waitlist_start_time || null;
+      payload.waitlist_start_time = waitlist_start_time ? normalizeClockTime(waitlist_start_time) : null;
     }
     if (waitlist_end_day !== undefined) {
       payload.waitlist_end_day = waitlist_end_day === null || waitlist_end_day === "" ? null : Number(waitlist_end_day);
     }
     if (waitlist_end_time !== undefined) {
-      payload.waitlist_end_time = waitlist_end_time || null;
+      payload.waitlist_end_time = waitlist_end_time ? normalizeClockTime(waitlist_end_time) : null;
     }
 
     if (payload.waitlist_start_day !== null && payload.waitlist_start_day !== undefined && payload.waitlist_start_time) {
@@ -781,6 +782,11 @@ router.post("/:id/stops", auth, requireRole("admin"), requireStaffGroup, async (
   try {
     const tripId = req.params.id;
     const { name, time, order } = req.body;
+    const normalizedTime = normalizeClockTime(time);
+
+    if (!normalizedTime) {
+      return res.status(400).json({ error: "Horario inválido. Usá formato HH:mm" });
+    }
 
     const allowed = await assertTripInGroup(tripId, req.groupId);
     if (!allowed) {
@@ -820,7 +826,7 @@ router.post("/:id/stops", auth, requireRole("admin"), requireStaffGroup, async (
       .insert({
         trip_id: tripId,
         stop_id: stop.id,
-        pickup_time: time,
+        pickup_time: normalizedTime,
         order_index: order,
       });
 
@@ -855,7 +861,7 @@ router.put("/:id/stops/sync", auth, requireRole("admin"), requireStaffGroup, asy
     const normalized = stops.map((stop, index) => ({
       id: stop?.id || null,
       name: String(stop?.name || "").trim(),
-      time: String(stop?.time || "").trim(),
+      time: normalizeClockTime(stop?.time),
       order: Number(stop?.order || index + 1),
     }));
 
@@ -986,9 +992,9 @@ router.put("/:id", auth, requireRole("admin"), requireStaffGroup, async (req, re
     if (waitlist_start_at !== undefined) payload.waitlist_start_at = waitlist_start_at || null;
     if (waitlist_end_at !== undefined) payload.waitlist_end_at = waitlist_end_at || null;
     if (waitlist_start_day !== undefined) payload.waitlist_start_day = waitlist_start_day === null || waitlist_start_day === "" ? null : Number(waitlist_start_day);
-    if (waitlist_start_time !== undefined) payload.waitlist_start_time = waitlist_start_time || null;
+    if (waitlist_start_time !== undefined) payload.waitlist_start_time = waitlist_start_time ? normalizeClockTime(waitlist_start_time) : null;
     if (waitlist_end_day !== undefined) payload.waitlist_end_day = waitlist_end_day === null || waitlist_end_day === "" ? null : Number(waitlist_end_day);
-    if (waitlist_end_time !== undefined) payload.waitlist_end_time = waitlist_end_time || null;
+    if (waitlist_end_time !== undefined) payload.waitlist_end_time = waitlist_end_time ? normalizeClockTime(waitlist_end_time) : null;
 
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({ error: "No data to update" });

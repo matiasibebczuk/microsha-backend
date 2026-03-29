@@ -24,6 +24,14 @@ function parseTimeToMinutes(value) {
   return hh * 60 + mm;
 }
 
+function normalizeClockTime(value) {
+  const minutes = parseTimeToMinutes(value);
+  if (minutes === null) return null;
+  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const mm = String(minutes % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
 function getTimezoneOffsetMinutesAt(date, timeZone) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -144,6 +152,7 @@ function isWaitlistWindowActiveBySchedule(startDay, startTime, endDay, endTime, 
 
 module.exports = {
   parseTimeToMinutes,
+  normalizeClockTime,
   getNextScheduleActivationIso,
   isWaitlistWindowActiveBySchedule,
 };

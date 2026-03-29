@@ -5,7 +5,7 @@ const { requireRole } = require("../middleware/roles");
 const { requireStaffGroup, assertTripInGroup } = require("../middleware/groupAccess");
 const fs = require("fs");
 const path = require("path");
-const { getNextScheduleActivationIso } = require("../utils/scheduleTime");
+const { getNextScheduleActivationIso, normalizeClockTime } = require("../utils/scheduleTime");
 
 const router = express.Router();
 
@@ -77,7 +77,7 @@ async function getTripStopTimes(tripId) {
 
   const result = {};
   for (const row of data || []) {
-    result[row.stop_id] = row.pickup_time;
+    result[row.stop_id] = normalizeClockTime(row.pickup_time) || null;
   }
 
   return result;
