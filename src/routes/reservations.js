@@ -35,6 +35,27 @@ async function getPauseState() {
   };
 }
 
+async function getPassengerSuspension(userId) {
+  if (!userId) return null;
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, suspended_until, suspension_reason")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  if (!data.suspended_until) return null;
+
+  const until = new Date(data.suspended_until);
+  if (Number.isNaN(until.getTime())) return null;
+  if (until.getTime() <= Date.now()) return null;
+
+  return {
+    suspendedUntil: data.suspended_until,
+    reason: data.suspension_reason || "Sanción activa",
+  };
+}
+
 async function getTripStatus(tripId) {
   const { data, error } = await supabase
     .from("trips")
@@ -368,6 +389,15 @@ router.post("/", requirePassengerSession, async (req, res) => {
     const { tripId, stopId } = req.body;
     const userId = req.passengerUserId;
 
+    const suspension = await getPassengerSuspension(userId);
+    if (suspension) {
+      return res.status(403).json({
+        error: "Cuenta suspendida temporalmente",
+        suspendedUntil: suspension.suspendedUntil,
+        reason: suspension.reason,
+      });
+    }
+
     if (!userId || !tripId || !stopId) {
       return res.status(400).json({ error: "Missing data" });
     }
@@ -541,6 +571,15 @@ router.put("/change", requirePassengerSession, async (req, res) => {
 
     const { tripId, stopId } = req.body;
     const userId = req.passengerUserId;
+
+    const suspension = await getPassengerSuspension(userId);
+    if (suspension) {
+      return res.status(403).json({
+        error: "Cuenta suspendida temporalmente",
+        suspendedUntil: suspension.suspendedUntil,
+        reason: suspension.reason,
+      });
+    }
 
     if (!tripId || !userId || !stopId) {
       return res.status(400).json({ error: "Missing data" });

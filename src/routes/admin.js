@@ -80,6 +80,147 @@ router.put("/system/flags", async (req, res) => {
   }
 });
 
+router.get("/sanctions", async (req, res) => {
+  try {
+    const nowIso = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, name, dni, member_number, phone, suspended_until, suspension_reason, suspension_origin, suspension_created_at")
+      .eq("group_id", req.groupId)
+      .eq("role", "passenger")
+      .not("suspended_until", "is", null)
+      .gt("suspended_until", nowIso)
+      .order("suspended_until", { ascending: true })
+      .limit(500);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.error("🔥 ADMIN SANCTIONS LIST ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.get("/sanctions/search", async (req, res) => {
+  try {
+    const q = String(req.query?.q || "").trim();
+    if (!q) return res.json([]);
+
+    const safeQ = q.replace(/[%_]/g, "");
+    const nowIso = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, name, dni, member_number, phone, no_show_streak, suspended_until, suspension_reason")
+      .eq("group_id", req.groupId)
+      .eq("role", "passenger")
+      .or(`name.ilike.%${safeQ}%,dni.ilike.%${safeQ}%,member_number.ilike.%${safeQ}%`)
+      .order("name", { ascending: true })
+      .limit(50);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    const rows = (Array.isArray(data) ? data : []).map((row) => ({
+      ...row,
+      is_suspended: Boolean(row?.suspended_until && new Date(row.suspended_until).getTime() > Date.now()),
+      suspended_now: Boolean(row?.suspended_until && new Date(row.suspended_until).getTime() > Date.now()),
+      now_iso: nowIso,
+    }));
+
+    return res.json(rows);
+  } catch (err) {
+    console.error("🔥 ADMIN SANCTIONS SEARCH ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.post("/sanctions", async (req, res) => {
+  try {
+    const userId = Number(req.body?.userId);
+    const days = Number(req.body?.days || 7);
+    const reason = String(req.body?.reason || "Sanción manual").trim() || "Sanción manual";
+
+    if (!Number.isFinite(userId)) {
+      return res.status(400).json({ error: "userId inválido" });
+    }
+
+    if (!Number.isFinite(days) || days <= 0 || days > 60) {
+      return res.status(400).json({ error: "days inválido" });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("id, role, group_id")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (userError) return res.status(500).json({ error: userError.message });
+    if (!user || user.role !== "passenger" || String(user.group_id || "") !== String(req.groupId || "")) {
+      return res.status(404).json({ error: "Pasajero no encontrado" });
+    }
+
+    const now = new Date();
+    const until = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const { data: updated, error: updateError } = await supabase
+      .from("users")
+      .update({
+        suspended_until: until.toISOString(),
+        suspension_reason: reason,
+        suspension_origin: "manual",
+        suspension_created_at: now.toISOString(),
+        no_show_streak: 0,
+      })
+      .eq("id", userId)
+      .select("id, suspended_until, suspension_reason, suspension_origin")
+      .single();
+
+    if (updateError) return res.status(500).json({ error: updateError.message });
+    return res.json(updated);
+  } catch (err) {
+    console.error("🔥 ADMIN SANCTIONS CREATE ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.delete("/sanctions/:userId", async (req, res) => {
+  try {
+    const userId = Number(req.params.userId);
+    if (!Number.isFinite(userId)) {
+      return res.status(400).json({ error: "userId inválido" });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("id, role, group_id")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (userError) return res.status(500).json({ error: userError.message });
+    if (!user || user.role !== "passenger" || String(user.group_id || "") !== String(req.groupId || "")) {
+      return res.status(404).json({ error: "Pasajero no encontrado" });
+    }
+
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({
+        suspended_until: null,
+        suspension_reason: null,
+        suspension_origin: null,
+        suspension_created_at: null,
+        no_show_streak: 0,
+      })
+      .eq("id", userId);
+
+    if (updateError) return res.status(500).json({ error: updateError.message });
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("🔥 ADMIN SANCTIONS DELETE ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
 router.get("/trips/:tripId/reservations", async (req, res) => {
   try {
     const { tripId } = req.params;

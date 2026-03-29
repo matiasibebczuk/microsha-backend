@@ -52,6 +52,7 @@ async function getTripPassengers(tripId) {
     .from("reservations")
     .select(`
       id,
+      user_id,
       status,
       boarded,
       stop_id,
@@ -65,6 +66,58 @@ async function getTripPassengers(tripId) {
   if (error) throw error;
 
   return data || [];
+}
+
+async function applyNoShowSanctions(passengers) {
+  const confirmedRows = (Array.isArray(passengers) ? passengers : []).filter(
+    (row) => row?.status === "confirmed" && row?.user_id
+  );
+
+  if (confirmedRows.length === 0) return;
+
+  const now = new Date();
+  const oneWeekMs = 7 * 24 * 60 * 60 * 1000;
+
+  for (const row of confirmedRows) {
+    const userId = row.user_id;
+    const boarded = Boolean(row.boarded);
+
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("id, no_show_streak")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (userError || !user) continue;
+
+    if (boarded) {
+      await supabase
+        .from("users")
+        .update({ no_show_streak: 0 })
+        .eq("id", userId);
+      continue;
+    }
+
+    const nextStreak = Number(user.no_show_streak || 0) + 1;
+    if (nextStreak >= 2) {
+      const suspendedUntil = new Date(now.getTime() + oneWeekMs).toISOString();
+      await supabase
+        .from("users")
+        .update({
+          no_show_streak: 0,
+          suspended_until: suspendedUntil,
+          suspension_reason: "2 ausencias consecutivas",
+          suspension_origin: "auto",
+          suspension_created_at: now.toISOString(),
+        })
+        .eq("id", userId);
+    } else {
+      await supabase
+        .from("users")
+        .update({ no_show_streak: nextStreak })
+        .eq("id", userId);
+    }
+  }
 }
 
 async function getTripStopTimes(tripId) {
@@ -511,6 +564,8 @@ router.post("/trips/:tripId/finish", async (req, res) => {
         return res.status(500).json({ error: insertError.message });
       }
     }
+
+    await applyNoShowSanctions(passengers);
 
     const { error: cleanupError } = await supabase
       .from("reservations")

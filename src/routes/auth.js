@@ -175,13 +175,21 @@ router.post("/passenger-login", async (req, res) => {
 
     const { data: user, error } = await supabase
       .from("users")
-      .select("id, name, role, phone, description")
+      .select("id, name, role, phone, description, suspended_until, suspension_reason")
       .eq("dni", dni)
       .eq("member_number", memberNumber)
       .single();
 
     if (error || !user) {
       return res.status(401).json({ error: "Datos incorrectos" });
+    }
+
+    if (user?.suspended_until && new Date(user.suspended_until).getTime() > Date.now()) {
+      return res.status(403).json({
+        error: "Cuenta suspendida temporalmente",
+        suspendedUntil: user.suspended_until,
+        reason: user.suspension_reason || "Sanción activa",
+      });
     }
 
     const passengerToken = issuePassengerToken(user.id);
