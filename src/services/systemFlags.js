@@ -1,10 +1,17 @@
 const fs = require("fs");
 const path = require("path");
+const { createClient } = require("@supabase/supabase-js");
 
 const dataDir = path.join(__dirname, "..", "..", "data");
 const flagsPath = path.join(dataDir, "system-flags.json");
 const ARGENTINA_TIMEZONE = "America/Argentina/Buenos_Aires";
 const DAY_MS = 24 * 60 * 60 * 1000;
+const FLAGS_ROW_ID = 1;
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 const DEFAULT_FLAGS = {
   tripsPaused: false,
@@ -102,6 +109,10 @@ function normalizeFlags(raw) {
 }
 
 async function applyScheduledPauseIfDue(flags) {
+  return applyScheduledPauseIfDueWithSaver(flags, async () => {});
+}
+
+async function applyScheduledPauseIfDueWithSaver(flags, saveFn) {
   if (!flags?.scheduledPauseEnabled) return { flags, changed: false };
   if (flags.scheduledPauseDay === null || !flags.scheduledPauseTime) return { flags, changed: false };
 
@@ -128,12 +139,11 @@ async function applyScheduledPauseIfDue(flags) {
     scheduledPauseLastTriggerWeek: currentWeekKey,
   };
 
-  await fs.promises.mkdir(dataDir, { recursive: true });
-  await fs.promises.writeFile(flagsPath, JSON.stringify(next, null, 2), "utf8");
+  await saveFn(next);
   return { flags: next, changed: true };
 }
 
-async function getSystemFlags() {
+async function readFlagsFromFile() {
   await fs.promises.mkdir(dataDir, { recursive: true });
 
   if (!fs.existsSync(flagsPath)) {
@@ -145,12 +155,106 @@ async function getSystemFlags() {
   try {
     const raw = await fs.promises.readFile(flagsPath, "utf8");
     const parsed = raw ? JSON.parse(raw) : {};
-    const normalized = normalizeFlags(parsed);
-    const { flags } = await applyScheduledPauseIfDue(normalized);
-    return flags;
+    return normalizeFlags(parsed);
   } catch {
     return normalizeFlags(DEFAULT_FLAGS);
   }
+}
+
+async function writeFlagsToFile(next) {
+  await fs.promises.mkdir(dataDir, { recursive: true });
+  await fs.promises.writeFile(flagsPath, JSON.stringify(normalizeFlags(next), null, 2), "utf8");
+}
+
+function isTableMissingError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return error?.code === "42P01" || message.includes("does not exist");
+}
+
+async function readFlagsFromDb() {
+  const { data, error } = await supabase
+    .from("system_settings")
+    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week")
+    .eq("id", FLAGS_ROW_ID)
+    .maybeSingle();
+
+  if (error) {
+    if (isTableMissingError(error)) {
+      return { supported: false, flags: null };
+    }
+    throw error;
+  }
+
+  if (!data) {
+    return { supported: true, flags: null };
+  }
+
+  return {
+    supported: true,
+    flags: normalizeFlags({
+      tripsPaused: data.trips_paused,
+      pauseMessage: data.pause_message,
+      scheduledPauseEnabled: data.scheduled_pause_enabled,
+      scheduledPauseDay: data.scheduled_pause_day,
+      scheduledPauseTime: data.scheduled_pause_time,
+      scheduledPauseLastTriggerWeek: data.scheduled_pause_last_trigger_week,
+    }),
+  };
+}
+
+async function writeFlagsToDb(next) {
+  const flags = normalizeFlags(next);
+  const payload = {
+    id: FLAGS_ROW_ID,
+    trips_paused: Boolean(flags.tripsPaused),
+    pause_message: String(flags.pauseMessage || DEFAULT_FLAGS.pauseMessage),
+    scheduled_pause_enabled: Boolean(flags.scheduledPauseEnabled),
+    scheduled_pause_day: flags.scheduledPauseDay,
+    scheduled_pause_time: flags.scheduledPauseTime,
+    scheduled_pause_last_trigger_week: flags.scheduledPauseLastTriggerWeek,
+    updated_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase
+    .from("system_settings")
+    .upsert(payload, { onConflict: "id" });
+
+  if (error) {
+    if (isTableMissingError(error)) {
+      return { supported: false };
+    }
+    throw error;
+  }
+
+  return { supported: true };
+}
+
+async function getSystemFlags() {
+  try {
+    const dbResult = await readFlagsFromDb();
+    if (dbResult.supported) {
+      let base = dbResult.flags;
+      if (!base) {
+        const fileBase = await readFlagsFromFile();
+        const seed = normalizeFlags(fileBase || DEFAULT_FLAGS);
+        await writeFlagsToDb(seed);
+        base = seed;
+      }
+
+      const { flags } = await applyScheduledPauseIfDueWithSaver(base, async (next) => {
+        await writeFlagsToDb(next);
+      });
+      return flags;
+    }
+  } catch {
+    // Fall through to file storage to keep app operational.
+  }
+
+  const normalized = await readFlagsFromFile();
+  const { flags } = await applyScheduledPauseIfDueWithSaver(normalized, async (next) => {
+    await writeFlagsToFile(next);
+  });
+  return flags;
 }
 
 async function setSystemFlags(patch) {
@@ -160,8 +264,14 @@ async function setSystemFlags(patch) {
     ...(patch && typeof patch === "object" ? patch : {}),
   });
 
-  await fs.promises.mkdir(dataDir, { recursive: true });
-  await fs.promises.writeFile(flagsPath, JSON.stringify(next, null, 2), "utf8");
+  try {
+    const dbWrite = await writeFlagsToDb(next);
+    if (dbWrite.supported) return next;
+  } catch {
+    // Fall back to file write.
+  }
+
+  await writeFlagsToFile(next);
   return next;
 }
 
