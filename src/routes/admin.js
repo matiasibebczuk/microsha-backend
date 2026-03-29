@@ -109,26 +109,31 @@ router.get("/sanctions/search", async (req, res) => {
     if (!q) return res.json([]);
 
     const safeQ = q.replace(/[%_]/g, "");
-    const safeGroupId = String(req.groupId || "").replace(/,/g, "");
+    const expectedGroupId = String(req.groupId || "").trim();
     const nowIso = new Date().toISOString();
 
     const { data, error } = await supabase
       .from("users")
-      .select("id, name, dni, member_number, phone, no_show_streak, suspended_until, suspension_reason")
-      .or(`group_number.eq.${safeGroupId},organization_id.eq.${safeGroupId}`)
+      .select("id, name, dni, member_number, phone, no_show_streak, suspended_until, suspension_reason, group_number, organization_id")
       .eq("role", "passenger")
       .or(`name.ilike.%${safeQ}%,dni.ilike.%${safeQ}%,member_number.ilike.%${safeQ}%`)
       .order("name", { ascending: true })
-      .limit(50);
+      .limit(200);
 
     if (error) return res.status(500).json({ error: error.message });
 
-    const rows = (Array.isArray(data) ? data : []).map((row) => ({
-      ...row,
-      is_suspended: Boolean(row?.suspended_until && new Date(row.suspended_until).getTime() > Date.now()),
-      suspended_now: Boolean(row?.suspended_until && new Date(row.suspended_until).getTime() > Date.now()),
-      now_iso: nowIso,
-    }));
+    const rows = (Array.isArray(data) ? data : [])
+      .filter((row) => {
+        const groupId = String(row?.group_number ?? row?.organization_id ?? "").trim();
+        return groupId && groupId === expectedGroupId;
+      })
+      .slice(0, 50)
+      .map((row) => ({
+        ...row,
+        is_suspended: Boolean(row?.suspended_until && new Date(row.suspended_until).getTime() > Date.now()),
+        suspended_now: Boolean(row?.suspended_until && new Date(row.suspended_until).getTime() > Date.now()),
+        now_iso: nowIso,
+      }));
 
     return res.json(rows);
   } catch (err) {
