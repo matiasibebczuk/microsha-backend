@@ -460,63 +460,124 @@ router.post("/trips/:tripId/promote/:reservationId", async (req, res) => {
  * GET /admin/history
  * Lista recorridos realizados.
  */
+function isMissingTableError(error) {
+  if (!error) return false;
+  if (error.code === "42P01") return true;
+  const message = String(error.message || "").toLowerCase();
+  return message.includes("does not exist") || message.includes("relation") || message.includes("tabla");
+}
+
+function parseHistoryRunParam(rawRunId) {
+  const value = String(rawRunId || "").trim();
+  if (!value) return { kind: "auto", id: null };
+  if (value.startsWith("history-")) {
+    const id = Number(value.slice("history-".length));
+    return { kind: "history", id: Number.isFinite(id) ? id : null };
+  }
+  if (value.startsWith("legacy-")) {
+    const id = Number(value.slice("legacy-".length));
+    return { kind: "legacy", id: Number.isFinite(id) ? id : null };
+  }
+  const id = Number(value);
+  return { kind: "auto", id: Number.isFinite(id) ? id : null };
+}
+
+async function buildControllerNameMap(runs) {
+  const map = {};
+  const profileIds = [...new Set((runs || []).map((r) => String(r?.taken_by || "")).filter(Boolean))];
+  for (const controllerId of profileIds) {
+    map[controllerId] = await resolveControllerName(controllerId);
+  }
+  return map;
+}
+
+async function loadNewHistoryRuns(groupId) {
+  const { data, error } = await supabase
+    .from("trip_history_runs")
+    .select("*")
+    .eq("group_id", String(groupId || ""))
+    .order("finished_at", { ascending: false })
+    .order("id", { ascending: false });
+
+  if (error) {
+    if (isMissingTableError(error)) return [];
+    throw error;
+  }
+
+  const rows = Array.isArray(data) ? data : [];
+  const nameMap = await buildControllerNameMap(rows);
+  return rows.map((run) => ({
+    ...run,
+    id: `history-${run.id}`,
+    started_by_name: nameMap[String(run.taken_by || "")] || "Sin nombre",
+    finished_by_name: nameMap[String(run.taken_by || "")] || "Sin nombre",
+  }));
+}
+
+async function loadLegacyHistoryRuns(groupId, skipSourceRunIds = new Set()) {
+  const allowedTripIds = await getTripIdsForGroup(groupId);
+  if (allowedTripIds.length === 0) return [];
+
+  const { data: runs, error } = await supabase
+    .from("trip_runs")
+    .select("*")
+    .in("trip_id", allowedTripIds)
+    .not("finished_at", "is", null)
+    .order("id", { ascending: false });
+
+  if (error) throw error;
+
+  const filteredRuns = (runs || []).filter((run) => !skipSourceRunIds.has(Number(run?.id || 0)));
+  if (filteredRuns.length === 0) return [];
+
+  const tripIds = [...new Set(filteredRuns.map((r) => r.trip_id).filter(Boolean))];
+  let tripsMap = {};
+  if (tripIds.length > 0) {
+    const { data: trips, error: tripError } = await supabase
+      .from("trips")
+      .select("id, name, departure_datetime, type")
+      .in("id", tripIds);
+
+    if (tripError) throw tripError;
+
+    tripsMap = (trips || []).reduce((acc, trip) => {
+      acc[trip.id] = trip;
+      return acc;
+    }, {});
+  }
+
+  const nameMap = await buildControllerNameMap(filteredRuns);
+
+  return filteredRuns.map((run) => ({
+    ...run,
+    id: `legacy-${run.id}`,
+    trip_name: tripsMap[run.trip_id]?.name || null,
+    trip_type: tripsMap[run.trip_id]?.type || null,
+    trip_departure_datetime: tripsMap[run.trip_id]?.departure_datetime || null,
+    started_by_name: nameMap[String(run.taken_by || "")] || "Sin nombre",
+    finished_by_name: nameMap[String(run.taken_by || "")] || "Sin nombre",
+  }));
+}
+
 router.get("/history", async (req, res) => {
   try {
-    const allowedTripIds = await getTripIdsForGroup(req.groupId);
-    if (allowedTripIds.length === 0) {
-      return res.json([]);
-    }
+    const newRuns = await loadNewHistoryRuns(req.groupId);
+    const skipSourceRunIds = new Set(
+      newRuns.map((run) => Number(run?.source_run_id || 0)).filter((id) => Number.isFinite(id) && id > 0)
+    );
+    const legacyRuns = await loadLegacyHistoryRuns(req.groupId, skipSourceRunIds);
 
-    const { data: runs, error } = await supabase
-      .from("trip_runs")
-      .select("*")
-      .in("trip_id", allowedTripIds)
-      .not("finished_at", "is", null)
-      .order("id", { ascending: false });
+    const result = [...newRuns, ...legacyRuns].sort((a, b) => {
+      const aTime = new Date(a?.finished_at || 0).getTime();
+      const bTime = new Date(b?.finished_at || 0).getTime();
+      if (aTime !== bTime) return bTime - aTime;
+      return String(b?.id || "").localeCompare(String(a?.id || ""));
+    });
 
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-
-    const tripIds = [...new Set((runs || []).map((r) => r.trip_id).filter(Boolean))];
-    const profileIds = [...new Set((runs || []).map((r) => r.taken_by).filter(Boolean))];
-
-    let tripsMap = {};
-    if (tripIds.length > 0) {
-      const { data: trips, error: tripError } = await supabase
-        .from("trips")
-        .select("id, name, departure_datetime, type")
-        .in("id", tripIds);
-
-      if (tripError) {
-        return res.status(500).json({ error: tripError.message });
-      }
-
-      tripsMap = (trips || []).reduce((acc, trip) => {
-        acc[trip.id] = trip;
-        return acc;
-      }, {});
-    }
-
-    const controllerNameMap = {};
-    for (const controllerId of profileIds) {
-      controllerNameMap[controllerId] = await resolveControllerName(controllerId);
-    }
-
-    const result = (runs || []).map((run) => ({
-      ...run,
-      trip_name: tripsMap[run.trip_id]?.name || null,
-      trip_type: tripsMap[run.trip_id]?.type || null,
-      trip_departure_datetime: tripsMap[run.trip_id]?.departure_datetime || null,
-      started_by_name: controllerNameMap[String(run.taken_by || "")] || "Sin nombre",
-      finished_by_name: controllerNameMap[String(run.taken_by || "")] || "Sin nombre",
-    }));
-
-    res.json(result);
-
+    return res.json(result);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Server exploded" });
+    return res.status(500).json({ error: "Server exploded" });
   }
 });
 
@@ -526,12 +587,66 @@ router.get("/history", async (req, res) => {
  */
 router.get("/history/:runId", async (req, res) => {
   try {
-    const { runId } = req.params;
+    const parsed = parseHistoryRunParam(req.params.runId);
+    if (!parsed.id) {
+      return res.status(400).json({ error: "runId inválido" });
+    }
+
+    const tryHistoryFirst = parsed.kind === "history" || parsed.kind === "auto";
+    if (tryHistoryFirst) {
+      const { data: historyRun, error: historyRunError } = await supabase
+        .from("trip_history_runs")
+        .select("*")
+        .eq("id", parsed.id)
+        .eq("group_id", String(req.groupId || ""))
+        .maybeSingle();
+
+      if (historyRunError && !isMissingTableError(historyRunError)) {
+        return res.status(500).json({ error: historyRunError.message });
+      }
+
+      if (historyRun) {
+        const runControllerName = await resolveControllerName(historyRun?.taken_by);
+        const { data: historyPassengers, error: passengersError } = await supabase
+          .from("trip_history_passengers")
+          .select("*")
+          .eq("history_run_id", historyRun.id)
+          .order("id", { ascending: true });
+
+        if (passengersError && !isMissingTableError(passengersError)) {
+          return res.status(500).json({ error: passengersError.message });
+        }
+
+        const passengers = Array.isArray(historyPassengers) ? historyPassengers : [];
+        const boarded = passengers.filter((p) => p.boarded).length;
+        const missing = passengers.filter((p) => !p.boarded && p.status === "confirmed").length;
+
+        return res.json({
+          run: {
+            ...historyRun,
+            id: `history-${historyRun.id}`,
+            started_by_name: runControllerName,
+            finished_by_name: runControllerName,
+          },
+          summary: {
+            total: passengers.length,
+            boarded,
+            missing,
+          },
+          passengers,
+        });
+      }
+    }
+
+    const tryLegacy = parsed.kind === "legacy" || parsed.kind === "auto";
+    if (!tryLegacy) {
+      return res.status(404).json({ error: "Run not found" });
+    }
 
     const { data: run, error: runError } = await supabase
       .from("trip_runs")
       .select("*")
-      .eq("id", runId)
+      .eq("id", parsed.id)
       .maybeSingle();
 
     if (runError) {
@@ -562,7 +677,7 @@ router.get("/history/:runId", async (req, res) => {
     const { data, error } = await supabase
       .from("trip_run_passengers")
       .select("*")
-      .eq("run_id", runId);
+      .eq("run_id", parsed.id);
 
     if (error) {
       return res.status(500).json({ error: error.message });
@@ -572,9 +687,10 @@ router.get("/history/:runId", async (req, res) => {
     const boarded = passengers.filter((p) => p.boarded).length;
     const missing = passengers.length - boarded;
 
-    res.json({
+    return res.json({
       run: {
         ...run,
+        id: `legacy-${run.id}`,
         trip_name: trip?.name || null,
         trip_type: trip?.type || null,
         trip_departure_datetime: trip?.departure_datetime || null,
@@ -588,10 +704,9 @@ router.get("/history/:runId", async (req, res) => {
       },
       passengers,
     });
-
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Server exploded" });
+    return res.status(500).json({ error: "Server exploded" });
   }
 });
 
@@ -602,25 +717,75 @@ const ExcelJS = require("exceljs");
  */
 router.get("/history/:runId/excel", async (req, res) => {
   try {
-    const { runId } = req.params;
-
-    // info del run
-    const { data: run } = await supabase
-      .from("trip_runs")
-      .select("*")
-      .eq("id", runId)
-      .single();
-
-    const allowed = await assertTripInGroup(run?.trip_id, req.groupId);
-    if (!allowed) {
-      return res.status(403).json({ error: "No tenés permisos para este recorrido" });
+    const parsed = parseHistoryRunParam(req.params.runId);
+    if (!parsed.id) {
+      return res.status(400).json({ error: "runId inválido" });
     }
 
-    // pasajeros
-    const { data: passengers } = await supabase
-      .from("trip_run_passengers")
-      .select("*")
-      .eq("run_id", runId);
+    let run = null;
+    let passengers = [];
+
+    const tryHistoryFirst = parsed.kind === "history" || parsed.kind === "auto";
+    if (tryHistoryFirst) {
+      const { data: historyRun, error: historyRunError } = await supabase
+        .from("trip_history_runs")
+        .select("*")
+        .eq("id", parsed.id)
+        .eq("group_id", String(req.groupId || ""))
+        .maybeSingle();
+
+      if (historyRunError && !isMissingTableError(historyRunError)) {
+        return res.status(500).json({ error: historyRunError.message });
+      }
+
+      if (historyRun) {
+        run = historyRun;
+        const { data: historyPassengers, error: historyPassengersError } = await supabase
+          .from("trip_history_passengers")
+          .select("*")
+          .eq("history_run_id", historyRun.id)
+          .order("id", { ascending: true });
+
+        if (historyPassengersError && !isMissingTableError(historyPassengersError)) {
+          return res.status(500).json({ error: historyPassengersError.message });
+        }
+        passengers = Array.isArray(historyPassengers) ? historyPassengers : [];
+      }
+    }
+
+    if (!run) {
+      const { data: legacyRun, error: runError } = await supabase
+        .from("trip_runs")
+        .select("*")
+        .eq("id", parsed.id)
+        .maybeSingle();
+
+      if (runError) {
+        return res.status(500).json({ error: runError.message });
+      }
+
+      if (!legacyRun) {
+        return res.status(404).json({ error: "Run not found" });
+      }
+
+      const allowed = await assertTripInGroup(legacyRun?.trip_id, req.groupId);
+      if (!allowed) {
+        return res.status(403).json({ error: "No tenés permisos para este recorrido" });
+      }
+
+      run = legacyRun;
+
+      const { data: legacyPassengers, error: passengersError } = await supabase
+        .from("trip_run_passengers")
+        .select("*")
+        .eq("run_id", parsed.id)
+        .order("id", { ascending: true });
+
+      if (passengersError) {
+        return res.status(500).json({ error: passengersError.message });
+      }
+      passengers = Array.isArray(legacyPassengers) ? legacyPassengers : [];
+    }
 
     const total = passengers.length;
     const yes = passengers.filter(p => p.boarded).length;
@@ -631,7 +796,7 @@ router.get("/history/:runId/excel", async (req, res) => {
     // hoja resumen
     const summary = workbook.addWorksheet("Resumen");
 
-    summary.addRow(["Run", runId]);
+    summary.addRow(["Run", req.params.runId]);
     summary.addRow(["Trip", run.trip_id]);
     summary.addRow(["Micro", run.bus_id]);
     summary.addRow(["Fecha", run.finished_at]);
@@ -661,7 +826,7 @@ router.get("/history/:runId/excel", async (req, res) => {
 
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=run-${runId}.xlsx`
+      `attachment; filename=run-${req.params.runId}.xlsx`
     );
 
     await workbook.xlsx.write(res);

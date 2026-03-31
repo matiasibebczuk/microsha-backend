@@ -79,6 +79,13 @@ function toPassengerInfo(userRow) {
   };
 }
 
+function isMissingTableError(error) {
+  if (!error) return false;
+  if (error.code === "42P01") return true;
+  const message = String(error.message || "").toLowerCase();
+  return message.includes("does not exist") || message.includes("relation") || message.includes("tabla");
+}
+
 async function readLateCancellationsForTrip(tripId, finishedAtIso) {
   const cutoffIso = getLastFriday20Iso(new Date(finishedAtIso));
   const cutoffMs = cutoffIso ? new Date(cutoffIso).getTime() : Number.NaN;
@@ -259,7 +266,7 @@ function groupPassengersByStop(passengers, timeMap) {
 async function getTripById(tripId) {
   const { data, error } = await supabase
     .from("trips")
-    .select("id, name, status, waitlist_start_day, waitlist_start_time")
+    .select("id, name, type, departure_datetime, status, waitlist_start_day, waitlist_start_time")
     .eq("id", tripId)
     .maybeSingle();
 
@@ -334,6 +341,139 @@ async function cleanupForcedReinforcementAfterFinish(parentTripId) {
     .eq("parent_trip_id", parentTripId);
 
   if (clearConfigError) throw clearConfigError;
+}
+
+async function persistTripHistorySnapshot({ run, trip, passengers, groupId, finishedAt }) {
+  const tripId = Number(run?.trip_id || trip?.id || 0) || null;
+  const sourceRunId = Number(run?.id || 0) || null;
+
+  const [{ data: stopsRows, error: stopsError }, { data: busesRows, error: busesError }] = await Promise.all([
+    supabase
+      .from("trip_stops")
+      .select("stop_id, pickup_time, order_index, stops(name)")
+      .eq("trip_id", tripId)
+      .order("order_index", { ascending: true }),
+    supabase
+      .from("trip_buses")
+      .select("bus_id, buses(name, capacity)")
+      .eq("trip_id", tripId),
+  ]);
+
+  if (stopsError && !isMissingTableError(stopsError)) throw stopsError;
+  if (busesError && !isMissingTableError(busesError)) throw busesError;
+
+  const stopsSnapshot = (Array.isArray(stopsRows) ? stopsRows : []).map((row) => ({
+    stop_id: row?.stop_id ?? null,
+    stop_name: row?.stops?.name || null,
+    pickup_time: row?.pickup_time || null,
+    order_index: Number(row?.order_index || 0) || null,
+  }));
+
+  const busesSnapshot = (Array.isArray(busesRows) ? busesRows : []).map((row) => ({
+    bus_id: row?.bus_id ?? null,
+    bus_name: row?.buses?.name || null,
+    capacity: Number(row?.buses?.capacity || 0) || 0,
+  }));
+
+  const normalizedPassengers = (Array.isArray(passengers) ? passengers : []).map((p) => ({
+    source_reservation_id: Number(p?.id || 0) || null,
+    user_id: p?.user_id ? String(p.user_id) : null,
+    user_name: p?.users?.name || "Sin nombre",
+    phone: p?.users?.phone || null,
+    description: p?.users?.description || "",
+    dni: p?.users?.dni || null,
+    member_number: p?.users?.member_number || null,
+    stop_id: Number(p?.stop_id || 0) || null,
+    stop_name: p?.stops?.name || "Sin parada",
+    status: p?.status || "confirmed",
+    boarded: Boolean(p?.boarded),
+  }));
+
+  const summarySnapshot = {
+    total: normalizedPassengers.length,
+    boarded: normalizedPassengers.filter((p) => p.boarded).length,
+    missing: normalizedPassengers.filter((p) => !p.boarded && p.status === "confirmed").length,
+    waiting: normalizedPassengers.filter((p) => p.status === "waiting").length,
+  };
+
+  const tripSnapshot = {
+    trip_id: tripId,
+    trip_name: trip?.name || null,
+    trip_type: trip?.type || null,
+    trip_departure_datetime: trip?.departure_datetime || null,
+    trip_status_at_finish: trip?.status || null,
+    stops: stopsSnapshot,
+    buses: busesSnapshot,
+  };
+
+  const { data: historyRun, error: historyRunError } = await supabase
+    .from("trip_history_runs")
+    .upsert({
+      source_run_id: sourceRunId,
+      trip_id: tripId,
+      group_id: String(groupId || ""),
+      trip_name: trip?.name || null,
+      trip_type: trip?.type || null,
+      trip_departure_datetime: trip?.departure_datetime || null,
+      trip_status_at_finish: trip?.status || null,
+      taken_by: run?.taken_by ? String(run.taken_by) : null,
+      started_at: run?.started_at || null,
+      finished_at: finishedAt,
+      trip_snapshot: tripSnapshot,
+      summary_snapshot: summarySnapshot,
+    }, { onConflict: "source_run_id" })
+    .select("id")
+    .single();
+
+  if (historyRunError) {
+    if (isMissingTableError(historyRunError)) {
+      console.warn("⚠️ trip_history_runs no existe. Ejecutá sql/2026-03-31_trip_history_snapshot.sql");
+      return;
+    }
+    throw historyRunError;
+  }
+
+  const historyRunId = Number(historyRun?.id || 0);
+  if (!historyRunId) return;
+
+  const { error: deletePassengersError } = await supabase
+    .from("trip_history_passengers")
+    .delete()
+    .eq("history_run_id", historyRunId);
+
+  if (deletePassengersError && !isMissingTableError(deletePassengersError)) {
+    throw deletePassengersError;
+  }
+
+  if (normalizedPassengers.length === 0) return;
+
+  const historyPassengersRows = normalizedPassengers.map((p) => ({
+    history_run_id: historyRunId,
+    source_run_id: sourceRunId,
+    source_reservation_id: p.source_reservation_id,
+    user_id: p.user_id,
+    user_name: p.user_name,
+    phone: p.phone,
+    description: p.description,
+    dni: p.dni,
+    member_number: p.member_number,
+    stop_id: p.stop_id,
+    stop_name: p.stop_name,
+    status: p.status,
+    boarded: p.boarded,
+  }));
+
+  const { error: historyPassengersError } = await supabase
+    .from("trip_history_passengers")
+    .insert(historyPassengersRows);
+
+  if (historyPassengersError) {
+    if (isMissingTableError(historyPassengersError)) {
+      console.warn("⚠️ trip_history_passengers no existe. Ejecutá sql/2026-03-31_trip_history_snapshot.sql");
+      return;
+    }
+    throw historyPassengersError;
+  }
 }
 
 async function appendAttendanceLog(entry) {
@@ -655,6 +795,18 @@ router.post("/trips/:tripId/finish", async (req, res) => {
       if (insertError) {
         return res.status(500).json({ error: insertError.message });
       }
+    }
+
+    try {
+      await persistTripHistorySnapshot({
+        run: activeRun,
+        trip,
+        passengers,
+        groupId: req.groupId,
+        finishedAt,
+      });
+    } catch (historyErr) {
+      console.error("⚠️ TRIP HISTORY SNAPSHOT ERROR:", historyErr);
     }
 
     await applyNoShowSanctions(passengers);
