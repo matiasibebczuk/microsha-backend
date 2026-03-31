@@ -171,6 +171,13 @@ function parseJsonArray(value) {
   return [];
 }
 
+function normalizeTripDirection(typeValue) {
+  const normalized = String(typeValue || "").trim().toLowerCase();
+  if (normalized.startsWith("ida")) return "ida";
+  if (normalized.startsWith("vuelta") || normalized.startsWith("regreso")) return "vuelta";
+  return null;
+}
+
 async function autoActivateReinforcementIfNeeded({ tripId, trip, groupId }) {
   if (!tripId || !groupId) return null;
 
@@ -451,6 +458,34 @@ router.post("/", requirePassengerSession, async (req, res) => {
 
     if (trip.status !== "open") {
       return res.status(400).json({ error: "Inscripción cerrada" });
+    }
+
+    const targetDirection = normalizeTripDirection(trip.type);
+    if (targetDirection) {
+      const { data: userReservations, error: directionError } = await supabase
+        .from("reservations")
+        .select("id, trip_id, status, trips ( id, type, name )")
+        .eq("user_id", userId)
+        .in("status", ["confirmed", "waiting"]);
+
+      if (directionError) {
+        return res.status(500).json({ error: directionError.message });
+      }
+
+      const sameDirection = (Array.isArray(userReservations) ? userReservations : []).find((row) => {
+        if (String(row?.trip_id || "") === String(tripId)) return false;
+        return normalizeTripDirection(row?.trips?.type) === targetDirection;
+      });
+
+      if (sameDirection) {
+        const directionLabel = targetDirection === "ida" ? "ida" : "vuelta";
+        return res.status(400).json({
+          error: `Solo podés tener un traslado de ${directionLabel} a la vez. Cancelá el actual para anotarte en otro.`,
+          direction: targetDirection,
+          existingTripId: sameDirection.trip_id,
+          existingTripName: sameDirection?.trips?.name || null,
+        });
+      }
     }
 
     const { data: existing, error: existingError } = await supabase
