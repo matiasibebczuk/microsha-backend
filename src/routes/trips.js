@@ -1660,7 +1660,9 @@ router.delete("/:id", auth, requireRole("admin"), requireStaffGroup, async (req,
     return res.json({ success: true });
   } catch (err) {
     console.error("🔥 DELETE TRIP ERROR:", err);
-    return res.status(500).json({ error: "Server exploded" });
+    const status = Number(err?.status || 500);
+    const message = String(err?.message || "Server exploded");
+    return res.status(Number.isFinite(status) ? status : 500).json({ error: message });
   }
 });
 
