@@ -6,6 +6,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 const FORCED_ALERT_RECIPIENTS = ["matiasbeck07@gmail.com"];
+const RESEND_TEST_ALLOWED_RECIPIENT = "matiasbeck07@gmail.com";
 
 function uniqueStrings(values) {
   return Array.from(new Set((values || []).filter(Boolean).map((v) => String(v).trim())));
@@ -79,6 +80,21 @@ async function sendViaResend({ to, subject, html }) {
     return { sent: false, reason: "missing_env" };
   }
 
+  const sender = String(from || "").trim().toLowerCase();
+  const isTestingSender = sender.endsWith("@resend.dev");
+  const toList = uniqueStrings(Array.isArray(to) ? to : []);
+  const effectiveTo = isTestingSender
+    ? toList.filter((email) => String(email || "").trim().toLowerCase() === RESEND_TEST_ALLOWED_RECIPIENT)
+    : toList;
+
+  if (effectiveTo.length === 0) {
+    console.warn("[alerts] No valid recipients after applying resend.dev testing restrictions", {
+      from,
+      requestedRecipients: toList,
+    });
+    return { sent: false, reason: "no_allowed_testing_recipient" };
+  }
+
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -87,7 +103,7 @@ async function sendViaResend({ to, subject, html }) {
     },
     body: JSON.stringify({
       from,
-      to,
+      to: effectiveTo,
       subject,
       html,
     }),
@@ -98,7 +114,7 @@ async function sendViaResend({ to, subject, html }) {
     throw new Error(`Resend error ${response.status}: ${body}`);
   }
 
-  return { sent: true };
+  return { sent: true, to: effectiveTo };
 }
 
 async function notifyAdminsReinforcementActivated({
