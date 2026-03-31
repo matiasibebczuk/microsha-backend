@@ -149,6 +149,180 @@ function parseJsonArray(value) {
   return [];
 }
 
+function isMissingTableError(error) {
+  if (!error) return false;
+  if (error.code === "42P01") return true;
+  const message = String(error.message || "").toLowerCase();
+  return message.includes("does not exist") || message.includes("relation") || message.includes("tabla");
+}
+
+async function backupTripHistoryBeforeDelete({ tripId, groupId }) {
+  const { data: trip, error: tripError } = await supabase
+    .from("trips")
+    .select("id, name, type, status, departure_datetime")
+    .eq("id", tripId)
+    .maybeSingle();
+
+  if (tripError) throw tripError;
+  if (!trip) return;
+
+  const { data: runs, error: runsError } = await supabase
+    .from("trip_runs")
+    .select("id, trip_id, taken_by, started_at, finished_at")
+    .eq("trip_id", tripId)
+    .not("finished_at", "is", null)
+    .order("id", { ascending: true });
+
+  if (runsError) throw runsError;
+
+  const finishedRuns = Array.isArray(runs) ? runs : [];
+  if (finishedRuns.length === 0) return;
+
+  const runIds = finishedRuns.map((run) => Number(run.id)).filter((id) => Number.isFinite(id));
+
+  const [stopsResult, busesResult, passengersResult] = await Promise.all([
+    supabase
+      .from("trip_stops")
+      .select("stop_id, pickup_time, order_index, stops(name)")
+      .eq("trip_id", tripId)
+      .order("order_index", { ascending: true }),
+    supabase
+      .from("trip_buses")
+      .select("bus_id, buses(name, capacity)")
+      .eq("trip_id", tripId),
+    supabase
+      .from("trip_run_passengers")
+      .select("run_id, user_name, phone, stop_name, boarded")
+      .in("run_id", runIds),
+  ]);
+
+  if (stopsResult.error) throw stopsResult.error;
+  if (busesResult.error) throw busesResult.error;
+  if (passengersResult.error) throw passengersResult.error;
+
+  const stopsSnapshot = (stopsResult.data || []).map((row) => ({
+    stop_id: row?.stop_id ?? null,
+    stop_name: row?.stops?.name || null,
+    pickup_time: row?.pickup_time || null,
+    order_index: Number(row?.order_index || 0) || null,
+  }));
+
+  const busesSnapshot = (busesResult.data || []).map((row) => ({
+    bus_id: row?.bus_id ?? null,
+    bus_name: row?.buses?.name || null,
+    capacity: Number(row?.buses?.capacity || 0) || 0,
+  }));
+
+  const passengersByRun = new Map();
+  for (const row of (passengersResult.data || [])) {
+    const key = Number(row?.run_id || 0);
+    if (!passengersByRun.has(key)) passengersByRun.set(key, []);
+    passengersByRun.get(key).push(row);
+  }
+
+  for (const run of finishedRuns) {
+    const runId = Number(run?.id || 0);
+    if (!runId) continue;
+
+    const runPassengers = passengersByRun.get(runId) || [];
+    const summarySnapshot = {
+      total: runPassengers.length,
+      boarded: runPassengers.filter((p) => Boolean(p?.boarded)).length,
+      missing: runPassengers.filter((p) => !Boolean(p?.boarded)).length,
+      waiting: 0,
+    };
+
+    const tripSnapshot = {
+      trip_id: Number(trip?.id || 0) || null,
+      trip_name: trip?.name || null,
+      trip_type: trip?.type || null,
+      trip_departure_datetime: trip?.departure_datetime || null,
+      trip_status_at_finish: trip?.status || null,
+      stops: stopsSnapshot,
+      buses: busesSnapshot,
+    };
+
+    const { data: historyRun, error: historyRunError } = await supabase
+      .from("trip_history_runs")
+      .upsert({
+        source_run_id: runId,
+        trip_id: Number(tripId),
+        group_id: String(groupId || ""),
+        trip_name: trip?.name || null,
+        trip_type: trip?.type || null,
+        trip_departure_datetime: trip?.departure_datetime || null,
+        trip_status_at_finish: trip?.status || null,
+        taken_by: run?.taken_by ? String(run.taken_by) : null,
+        started_at: run?.started_at || null,
+        finished_at: run?.finished_at,
+        trip_snapshot: tripSnapshot,
+        summary_snapshot: summarySnapshot,
+      }, { onConflict: "source_run_id" })
+      .select("id")
+      .single();
+
+    if (historyRunError) {
+      if (isMissingTableError(historyRunError)) {
+        const migrationPath = "microsha-backend/sql/2026-03-31_trip_history_snapshot.sql";
+        const migrationError = new Error(`Falta migración de historial independiente (${migrationPath}). Ejecutala antes de eliminar traslados.`);
+        migrationError.status = 409;
+        throw migrationError;
+      }
+      throw historyRunError;
+    }
+
+    const historyRunId = Number(historyRun?.id || 0);
+    if (!historyRunId) continue;
+
+    const { error: clearHistoryPassengersError } = await supabase
+      .from("trip_history_passengers")
+      .delete()
+      .eq("history_run_id", historyRunId);
+
+    if (clearHistoryPassengersError) {
+      if (isMissingTableError(clearHistoryPassengersError)) {
+        const migrationPath = "microsha-backend/sql/2026-03-31_trip_history_snapshot.sql";
+        const migrationError = new Error(`Falta migración de historial independiente (${migrationPath}). Ejecutala antes de eliminar traslados.`);
+        migrationError.status = 409;
+        throw migrationError;
+      }
+      throw clearHistoryPassengersError;
+    }
+
+    if (runPassengers.length === 0) continue;
+
+    const historyPassengersRows = runPassengers.map((p) => ({
+      history_run_id: historyRunId,
+      source_run_id: runId,
+      source_reservation_id: null,
+      user_id: null,
+      user_name: p?.user_name || "Sin nombre",
+      phone: p?.phone || null,
+      description: "",
+      dni: null,
+      member_number: null,
+      stop_id: null,
+      stop_name: p?.stop_name || "Sin parada",
+      status: "confirmed",
+      boarded: Boolean(p?.boarded),
+    }));
+
+    const { error: historyPassengersError } = await supabase
+      .from("trip_history_passengers")
+      .insert(historyPassengersRows);
+
+    if (historyPassengersError) {
+      if (isMissingTableError(historyPassengersError)) {
+        const migrationPath = "microsha-backend/sql/2026-03-31_trip_history_snapshot.sql";
+        const migrationError = new Error(`Falta migración de historial independiente (${migrationPath}). Ejecutala antes de eliminar traslados.`);
+        migrationError.status = 409;
+        throw migrationError;
+      }
+      throw historyPassengersError;
+    }
+  }
+}
+
 function parseClockToMinutes(value) {
   const text = String(value || "").trim();
   const match = text.match(/^(\d{1,2}):(\d{2})/);
@@ -1466,6 +1640,11 @@ router.delete("/:id", auth, requireRole("admin"), requireStaffGroup, async (req,
     if (activeRun) {
       return res.status(400).json({ error: "No podés eliminar un viaje con recorrido activo" });
     }
+
+    await backupTripHistoryBeforeDelete({
+      tripId,
+      groupId: req.groupId,
+    });
 
     await supabase.from("reservations").delete().eq("trip_id", tripId);
     await supabase.from("trip_stops").delete().eq("trip_id", tripId);
