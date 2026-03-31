@@ -6,6 +6,7 @@ const { requireStaffGroup, assertTripInGroup } = require("../middleware/groupAcc
 const { getTripIdsForGroup } = require("../middleware/groupStore");
 const { getSystemFlags, setSystemFlags } = require("../services/systemFlags");
 const { isSanctionsEnabled } = require("../config/featureFlags");
+const { sendAdminTestEmail } = require("../services/reinforcementNotifications");
 
 const router = express.Router();
 
@@ -119,6 +120,32 @@ router.put("/system/flags", async (req, res) => {
     return res.json(flags);
   } catch (err) {
     console.error("🔥 ADMIN FLAGS PUT ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.post("/test-email", async (req, res) => {
+  try {
+    const label = String(req.body?.label || "").trim();
+    const result = await sendAdminTestEmail({
+      groupId: req.groupId,
+      label,
+    });
+
+    if (!result?.sent) {
+      return res.status(503).json({
+        success: false,
+        reason: result?.reason || "send_failed",
+        to: Array.isArray(result?.to) ? result.to : [],
+      });
+    }
+
+    return res.json({
+      success: true,
+      to: Array.isArray(result?.to) ? result.to : [],
+    });
+  } catch (err) {
+    console.error("🔥 ADMIN TEST EMAIL ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
   }
 });

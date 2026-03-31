@@ -183,7 +183,33 @@ async function notifyAdminsTripFinishedSummary({
   return sendViaResend({ to, subject, html });
 }
 
+async function sendAdminTestEmail({ groupId, label }) {
+  const to = await resolveAdminEmails(groupId);
+  if (to.length === 0) {
+    return { sent: false, reason: "no_admin_emails", to: [] };
+  }
+
+  const safeLabel = escapeHtml(label || "Test manual desde panel admin");
+  const nowLabel = new Date().toLocaleString("es-AR", {
+    timeZone: "America/Argentina/Buenos_Aires",
+  });
+  const subject = "MicroSHA · Test de envío de email";
+  const html = [
+    `<h2>Test de envío</h2>`,
+    `<p>Este es un correo de prueba enviado desde el panel de administración.</p>`,
+    `<p><b>Detalle:</b> ${safeLabel}</p>`,
+    `<p><b>Fecha:</b> ${escapeHtml(nowLabel)}</p>`,
+  ].join("");
+
+  const result = await sendViaResend({ to, subject, html });
+  return {
+    ...result,
+    to,
+  };
+}
+
 module.exports = {
   notifyAdminsReinforcementActivated,
   notifyAdminsTripFinishedSummary,
+  sendAdminTestEmail,
 };
