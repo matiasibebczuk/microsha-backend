@@ -178,6 +178,15 @@ function normalizeTripDirection(typeValue) {
   return null;
 }
 
+function isMissingRpcFunction(error, functionName) {
+  const message = String(error?.message || "").toLowerCase();
+  const fn = String(functionName || "").toLowerCase();
+  return (
+    error?.code === "PGRST202"
+    || (message.includes("function") && message.includes(fn) && (message.includes("does not exist") || message.includes("could not find")))
+  );
+}
+
 async function autoActivateReinforcementIfNeeded({ tripId, trip, groupId }) {
   if (!tripId || !groupId) return null;
 
@@ -460,84 +469,139 @@ router.post("/", requirePassengerSession, async (req, res) => {
       return res.status(400).json({ error: "Inscripción cerrada" });
     }
 
-    const targetDirection = normalizeTripDirection(trip.type);
-    if (targetDirection) {
-      const { data: userReservations, error: directionError } = await supabase
-        .from("reservations")
-        .select("id, trip_id, status, trips ( id, type, name )")
-        .eq("user_id", userId)
-        .in("status", ["confirmed", "waiting"]);
-
-      if (directionError) {
-        return res.status(500).json({ error: directionError.message });
-      }
-
-      const sameDirection = (Array.isArray(userReservations) ? userReservations : []).find((row) => {
-        if (String(row?.trip_id || "") === String(tripId)) return false;
-        return normalizeTripDirection(row?.trips?.type) === targetDirection;
-      });
-
-      if (sameDirection) {
-        const directionLabel = targetDirection === "ida" ? "ida" : "vuelta";
-        return res.status(400).json({
-          error: `Solo podés tener un traslado de ${directionLabel} a la vez. Cancelá el actual para anotarte en otro.`,
-          direction: targetDirection,
-          existingTripId: sameDirection.trip_id,
-          existingTripName: sameDirection?.trips?.name || null,
-        });
-      }
-    }
-
-    const { data: existing, error: existingError } = await supabase
-      .from("reservations")
-      .select("id, status, stop_id")
-      .eq("trip_id", tripId)
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    if (existingError) {
-      return res.status(500).json({ error: existingError.message });
-    }
-
-    if (existing) {
-      if (existing.stop_id === stopId) {
-        return res.json({ status: existing.status, existing: true });
-      }
-
-      const { error: updateError } = await supabase
-        .from("reservations")
-        .update({ stop_id: stopId })
-        .eq("id", existing.id);
-
-      if (updateError) {
-        return res.status(500).json({ error: updateError.message });
-      }
-
-      return res.json({ status: existing.status, updated: true });
-    }
-
-    const { count: confirmed } = await supabase
-      .from("reservations")
-      .select("*", { count: "exact", head: true })
-      .eq("trip_id", tripId)
-      .eq("status", "confirmed");
-
-    const capacity = await getTripCapacity(tripId);
-    const hasSeats = (confirmed || 0) < capacity;
-
     const waitlistWindowActive = isWaitlistWindowActive(trip);
-    const status = hasSeats ? "confirmed" : "waiting";
+    let status = null;
+    let hasSeats = false;
+    let handledByAtomic = false;
 
-    const { error } = await supabase
-      .from("reservations")
-      .insert({
-        user_id: userId,
-        trip_id: tripId,
-        stop_id: stopId,
-        status,
+    const atomicTripId = Number(tripId);
+    const atomicStopId = Number(stopId);
+    const atomicUserId = Number(userId);
+
+    if (Number.isFinite(atomicTripId) && Number.isFinite(atomicStopId) && Number.isFinite(atomicUserId)) {
+      const { data: atomicResult, error: atomicError } = await supabase.rpc("reserve_trip_atomic", {
+        p_trip_id: atomicTripId,
+        p_stop_id: atomicStopId,
+        p_user_id: atomicUserId,
       });
 
-    if (error) return res.status(500).json({ error: error.message });
+      if (atomicError) {
+        if (!isMissingRpcFunction(atomicError, "reserve_trip_atomic")) {
+          return res.status(500).json({ error: atomicError.message || "No se pudo crear la reserva" });
+        }
+        console.warn("⚠️ reserve_trip_atomic no disponible, usando fallback legacy");
+      } else if (atomicResult && typeof atomicResult === "object") {
+        handledByAtomic = true;
+        if (atomicResult.ok !== true) {
+          const code = String(atomicResult.code || "");
+          const message = String(atomicResult.message || "No se pudo crear la reserva");
+          if (code === "trip_not_found") {
+            return res.status(404).json({ error: message });
+          }
+          if (code === "trip_closed") {
+            return res.status(400).json({ error: message });
+          }
+          if (code === "direction_limit") {
+            return res.status(400).json({
+              error: message,
+              direction: atomicResult.direction || null,
+              existingTripId: atomicResult.existingTripId || null,
+              existingTripName: atomicResult.existingTripName || null,
+            });
+          }
+          return res.status(400).json({ error: message });
+        }
+
+        status = String(atomicResult.status || "waiting");
+        hasSeats = status === "confirmed";
+
+        if (atomicResult.existing) {
+          return res.json({ status, existing: true });
+        }
+        if (atomicResult.updated) {
+          return res.json({ status, updated: true });
+        }
+      }
+    }
+
+    if (!handledByAtomic) {
+      const targetDirection = normalizeTripDirection(trip.type);
+      if (targetDirection) {
+        const { data: userReservations, error: directionError } = await supabase
+          .from("reservations")
+          .select("id, trip_id, status, trips ( id, type, name )")
+          .eq("user_id", userId)
+          .in("status", ["confirmed", "waiting"]);
+
+        if (directionError) {
+          return res.status(500).json({ error: directionError.message });
+        }
+
+        const sameDirection = (Array.isArray(userReservations) ? userReservations : []).find((row) => {
+          if (String(row?.trip_id || "") === String(tripId)) return false;
+          return normalizeTripDirection(row?.trips?.type) === targetDirection;
+        });
+
+        if (sameDirection) {
+          const directionLabel = targetDirection === "ida" ? "ida" : "vuelta";
+          return res.status(400).json({
+            error: `Solo podés tener un traslado de ${directionLabel} a la vez. Cancelá el actual para anotarte en otro.`,
+            direction: targetDirection,
+            existingTripId: sameDirection.trip_id,
+            existingTripName: sameDirection?.trips?.name || null,
+          });
+        }
+      }
+
+      const { data: existing, error: existingError } = await supabase
+        .from("reservations")
+        .select("id, status, stop_id")
+        .eq("trip_id", tripId)
+        .eq("user_id", userId)
+        .maybeSingle();
+
+      if (existingError) {
+        return res.status(500).json({ error: existingError.message });
+      }
+
+      if (existing) {
+        if (existing.stop_id === stopId) {
+          return res.json({ status: existing.status, existing: true });
+        }
+
+        const { error: updateError } = await supabase
+          .from("reservations")
+          .update({ stop_id: stopId })
+          .eq("id", existing.id);
+
+        if (updateError) {
+          return res.status(500).json({ error: updateError.message });
+        }
+
+        return res.json({ status: existing.status, updated: true });
+      }
+
+      const { count: confirmed } = await supabase
+        .from("reservations")
+        .select("*", { count: "exact", head: true })
+        .eq("trip_id", tripId)
+        .eq("status", "confirmed");
+
+      const capacity = await getTripCapacity(tripId);
+      hasSeats = (confirmed || 0) < capacity;
+      status = hasSeats ? "confirmed" : "waiting";
+
+      const { error } = await supabase
+        .from("reservations")
+        .insert({
+          user_id: userId,
+          trip_id: tripId,
+          stop_id: stopId,
+          status,
+        });
+
+      if (error) return res.status(500).json({ error: error.message });
+    }
 
     let autoPromotedCount = 0;
     let autoReinforcementTripId = null;
