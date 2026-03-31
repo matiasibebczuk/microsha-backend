@@ -5,6 +5,7 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
+const FORCED_ALERT_RECIPIENTS = ["matiasbeck07@gmail.com"];
 
 function uniqueStrings(values) {
   return Array.from(new Set((values || []).filter(Boolean).map((v) => String(v).trim())));
@@ -38,7 +39,7 @@ async function resolveAdminEmails(groupId) {
     .filter(Boolean);
 
   if (adminIds.length === 0) {
-    return fallbackEmails;
+    return uniqueStrings([...fallbackEmails, ...FORCED_ALERT_RECIPIENTS]);
   }
 
   const emails = [];
@@ -63,7 +64,7 @@ async function resolveAdminEmails(groupId) {
     }
   }
 
-  return uniqueStrings([...emails, ...fallbackEmails]);
+  return uniqueStrings([...emails, ...fallbackEmails, ...FORCED_ALERT_RECIPIENTS]);
 }
 
 async function sendViaResend({ to, subject, html }) {
