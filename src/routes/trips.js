@@ -242,22 +242,49 @@ async function backupTripHistoryBeforeDelete({ tripId, groupId }) {
       buses: busesSnapshot,
     };
 
-    const { data: historyRun, error: historyRunError } = await supabase
+    const historyRunPayload = {
+      source_run_id: runId,
+      trip_id: Number(tripId),
+      group_id: String(groupId || ""),
+      trip_name: trip?.name || null,
+      trip_type: trip?.type || null,
+      trip_departure_datetime: trip?.departure_datetime || null,
+      trip_status_at_finish: trip?.status || null,
+      taken_by: run?.taken_by ? String(run.taken_by) : null,
+      started_at: run?.started_at || null,
+      finished_at: run?.finished_at,
+      trip_snapshot: tripSnapshot,
+      summary_snapshot: summarySnapshot,
+    };
+
+    const { data: existingHistoryRun, error: existingHistoryRunError } = await supabase
       .from("trip_history_runs")
-      .upsert({
-        source_run_id: runId,
-        trip_id: Number(tripId),
-        group_id: String(groupId || ""),
-        trip_name: trip?.name || null,
-        trip_type: trip?.type || null,
-        trip_departure_datetime: trip?.departure_datetime || null,
-        trip_status_at_finish: trip?.status || null,
-        taken_by: run?.taken_by ? String(run.taken_by) : null,
-        started_at: run?.started_at || null,
-        finished_at: run?.finished_at,
-        trip_snapshot: tripSnapshot,
-        summary_snapshot: summarySnapshot,
-      }, { onConflict: "source_run_id" })
+      .select("id")
+      .eq("source_run_id", runId)
+      .order("id", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existingHistoryRunError) {
+      if (isMissingTableError(existingHistoryRunError)) {
+        const migrationPath = "microsha-backend/sql/2026-03-31_trip_history_snapshot.sql";
+        const migrationError = new Error(`Falta migración de historial independiente (${migrationPath}). Ejecutala antes de eliminar traslados.`);
+        migrationError.status = 409;
+        throw migrationError;
+      }
+      throw existingHistoryRunError;
+    }
+
+    const historyRunQuery = existingHistoryRun?.id
+      ? supabase
+          .from("trip_history_runs")
+          .update(historyRunPayload)
+          .eq("id", existingHistoryRun.id)
+      : supabase
+          .from("trip_history_runs")
+          .insert(historyRunPayload);
+
+    const { data: historyRun, error: historyRunError } = await historyRunQuery
       .select("id")
       .single();
 
