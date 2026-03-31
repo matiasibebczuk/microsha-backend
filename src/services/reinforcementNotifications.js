@@ -10,13 +10,36 @@ function uniqueStrings(values) {
   return Array.from(new Set((values || []).filter(Boolean).map((v) => String(v).trim())));
 }
 
-async function resolveAdminEmails(groupId) {
-  const memberships = await getStaffMembershipsByGroup(groupId);
-  const adminIds = memberships
-    .filter((membership) => String(membership.role || "").toLowerCase() === "admin")
-    .map((membership) => membership.userId);
+function parseEmailList(value) {
+  return uniqueStrings(
+    String(value || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+  );
+}
 
-  if (adminIds.length === 0) return [];
+async function resolveAdminEmails(groupId) {
+  const fallbackEmails = parseEmailList(process.env.ADMIN_ALERTS_FALLBACK_TO);
+
+  let memberships = [];
+  try {
+    memberships = await getStaffMembershipsByGroup(groupId);
+  } catch (error) {
+    console.error("[alerts] Could not resolve staff memberships", {
+      groupId,
+      message: error?.message || "unknown",
+    });
+  }
+
+  const adminIds = (Array.isArray(memberships) ? memberships : [])
+    .filter((membership) => String(membership.role || "").toLowerCase() === "admin")
+    .map((membership) => membership.userId)
+    .filter(Boolean);
+
+  if (adminIds.length === 0) {
+    return fallbackEmails;
+  }
 
   const emails = [];
   for (const adminId of adminIds) {
@@ -25,12 +48,22 @@ async function resolveAdminEmails(groupId) {
       if (!error && data?.user?.email) {
         emails.push(data.user.email);
       }
-    } catch {
+      if (error) {
+        console.warn("[alerts] Failed resolving admin email", {
+          adminId,
+          message: error?.message || "unknown",
+        });
+      }
+    } catch (error) {
+      console.warn("[alerts] Failed resolving admin email", {
+        adminId,
+        message: error?.message || "unknown",
+      });
       // Ignore per-user lookup failures; we still notify remaining admins.
     }
   }
 
-  return uniqueStrings(emails);
+  return uniqueStrings([...emails, ...fallbackEmails]);
 }
 
 async function sendViaResend({ to, subject, html }) {
@@ -38,6 +71,10 @@ async function sendViaResend({ to, subject, html }) {
   const from = process.env.ADMIN_ALERTS_FROM_EMAIL;
 
   if (!apiKey || !from) {
+    console.warn("[alerts] Resend not configured", {
+      hasApiKey: Boolean(apiKey),
+      hasFrom: Boolean(from),
+    });
     return { sent: false, reason: "missing_env" };
   }
 
@@ -122,6 +159,7 @@ async function notifyAdminsTripFinishedSummary({
 }) {
   const to = await resolveAdminEmails(groupId);
   if (to.length === 0) {
+    console.warn("[alerts] No admin recipients for trip finish summary", { groupId });
     return { sent: false, reason: "no_admin_emails" };
   }
 

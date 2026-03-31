@@ -259,7 +259,7 @@ function groupPassengersByStop(passengers, timeMap) {
 async function getTripById(tripId) {
   const { data, error } = await supabase
     .from("trips")
-    .select("id, status, waitlist_start_day, waitlist_start_time")
+    .select("id, name, status, waitlist_start_day, waitlist_start_time")
     .eq("id", tripId)
     .maybeSingle();
 
@@ -665,13 +665,22 @@ router.post("/trips/:tripId/finish", async (req, res) => {
     const lateCancellations = await readLateCancellationsForTrip(tripId, finishedAt);
 
     try {
-      await notifyAdminsTripFinishedSummary({
+      const notifyResult = await notifyAdminsTripFinishedSummary({
         groupId: req.groupId,
         tripName: trip?.name || `Traslado ${tripId}`,
         absentPassengers,
         lateCancellations,
         fridayCutoffLabel: "viernes 20:00 (America/Argentina/Buenos_Aires)",
       });
+      if (!notifyResult?.sent) {
+        console.warn("[alerts] Trip finish summary not sent", {
+          tripId,
+          groupId: req.groupId,
+          reason: notifyResult?.reason || "unknown",
+          absentCount: absentPassengers.length,
+          cancellationsCount: lateCancellations.length,
+        });
+      }
     } catch (notifyError) {
       console.error("⚠️ TRIP FINISH EMAIL ERROR:", notifyError);
     }
