@@ -90,6 +90,61 @@ async function notifyAdminsReinforcementActivated({
   return sendViaResend({ to, subject, html });
 }
 
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderPeopleList(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return "<p>Sin registros.</p>";
+  }
+
+  const rows = items.map((item) => {
+    const name = escapeHtml(item?.name || "Sin nombre");
+    const description = escapeHtml(item?.description || "-");
+    return `<li><b>${name}</b> · Description: ${description}</li>`;
+  });
+
+  return `<ul>${rows.join("")}</ul>`;
+}
+
+async function notifyAdminsTripFinishedSummary({
+  groupId,
+  tripName,
+  absentPassengers,
+  lateCancellations,
+  fridayCutoffLabel,
+}) {
+  const to = await resolveAdminEmails(groupId);
+  if (to.length === 0) {
+    return { sent: false, reason: "no_admin_emails" };
+  }
+
+  const safeTripName = escapeHtml(tripName || "Traslado");
+  const safeCutoff = escapeHtml(fridayCutoffLabel || "viernes 20:00");
+  const subject = `Resumen de finalización: ${tripName || "Traslado"}`;
+  const html = [
+    `<h2>Finalización de traslado</h2>`,
+    `<p><b>Traslado:</b> ${safeTripName}</p>`,
+    `<hr />`,
+    `<h3>1) Personas ausentes</h3>`,
+    `<p>Anotados confirmados que no asistieron.</p>`,
+    renderPeopleList(absentPassengers),
+    `<hr />`,
+    `<h3>2) Personas dadas de baja / desanotadas</h3>`,
+    `<p>Solo se incluyen bajas desde ${safeCutoff}.</p>`,
+    renderPeopleList(lateCancellations),
+  ].join("");
+
+  return sendViaResend({ to, subject, html });
+}
+
 module.exports = {
   notifyAdminsReinforcementActivated,
+  notifyAdminsTripFinishedSummary,
 };

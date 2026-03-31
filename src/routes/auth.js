@@ -1,14 +1,17 @@
 const express = require("express");
-const { createClient } = require("@supabase/supabase-js");
 const { issuePassengerToken } = require("../middleware/passengerSession");
 const { requirePassengerSession } = require("../middleware/passengerSession");
+const { supabase } = require("../lib/supabaseClient");
+const { isSanctionsEnabled } = require("../config/featureFlags");
 
 const router = express.Router();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+function maskIdentifier(value, visible = 3) {
+  const text = String(value || "");
+  if (!text) return "";
+  if (text.length <= visible) return text;
+  return `${text.slice(0, visible)}***`;
+}
 
 const PHONE_REGEX = /^11\d{8}$/;
 
@@ -168,23 +171,48 @@ router.post("/passenger", async (req, res) => {
 router.post("/passenger-login", async (req, res) => {
   try {
     const { dni, memberNumber } = req.body;
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    console.info("[auth][passenger-login] attempt", {
+      requestId,
+      dniPrefix: maskIdentifier(dni),
+      memberPrefix: maskIdentifier(memberNumber),
+    });
 
     if (!dni || !memberNumber) {
+      console.warn("[auth][passenger-login] missing data", { requestId });
       return res.status(400).json({ error: "Missing data" });
     }
 
-    const { data: user, error } = await supabase
+    const { data: users, error } = await supabase
       .from("users")
       .select("id, name, role, phone, description, suspended_until, suspension_reason")
       .eq("dni", dni)
       .eq("member_number", memberNumber)
-      .single();
+      .limit(2);
 
-    if (error || !user) {
+    if (error) {
+      console.warn("[auth][passenger-login] query error", {
+        requestId,
+        error: error?.message || null,
+      });
+      return res.status(500).json({ error: "No se pudo validar el acceso" });
+    }
+
+    if (!Array.isArray(users) || users.length === 0) {
       return res.status(401).json({ error: "Datos incorrectos" });
     }
 
-    if (user?.suspended_until && new Date(user.suspended_until).getTime() > Date.now()) {
+    if (users.length > 1) {
+      console.warn("[auth][passenger-login] duplicate account rows", {
+        requestId,
+        matches: users.length,
+      });
+    }
+
+    const user = users[0];
+
+    if (isSanctionsEnabled() && user?.suspended_until && new Date(user.suspended_until).getTime() > Date.now()) {
       const untilLabel = new Date(user.suspended_until).toLocaleString("es-AR", {
         timeZone: "America/Argentina/Buenos_Aires",
       });
@@ -205,6 +233,12 @@ router.post("/passenger-login", async (req, res) => {
       description: normalizedDescription,
     });
 
+    console.info("[auth][passenger-login] success", {
+      requestId,
+      userId: user.id,
+      needsProfileCompletion,
+    });
+
     res.json({
       ...user,
       phone: normalizedPhone || null,
@@ -214,8 +248,35 @@ router.post("/passenger-login", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
+    console.error("[auth][passenger-login] fatal", {
+      message: err?.message || "unknown",
+      stack: err?.stack || null,
+    });
     res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.get("/supabase-health", async (req, res) => {
+  try {
+    const startedAt = Date.now();
+    const { error } = await withTimeout(
+      supabase
+        .from("users")
+        .select("id", { head: true, count: "exact" })
+        .limit(1),
+      5000,
+      "supabase-health"
+    );
+
+    if (error) {
+      console.error("[auth][supabase-health] query failed", { message: error.message });
+      return res.status(503).json({ ok: false, error: error.message, latencyMs: Date.now() - startedAt });
+    }
+
+    return res.json({ ok: true, latencyMs: Date.now() - startedAt });
+  } catch (err) {
+    console.error("[auth][supabase-health] fatal", { message: err?.message || "unknown" });
+    return res.status(503).json({ ok: false, error: err?.message || "health check failed" });
   }
 });
 

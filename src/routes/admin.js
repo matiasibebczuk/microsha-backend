@@ -5,6 +5,7 @@ const { requireRole } = require("../middleware/roles");
 const { requireStaffGroup, assertTripInGroup } = require("../middleware/groupAccess");
 const { getTripIdsForGroup } = require("../middleware/groupStore");
 const { getSystemFlags, setSystemFlags } = require("../services/systemFlags");
+const { isSanctionsEnabled } = require("../config/featureFlags");
 
 const router = express.Router();
 
@@ -124,6 +125,10 @@ router.put("/system/flags", async (req, res) => {
 
 router.get("/sanctions", async (req, res) => {
   try {
+    if (!isSanctionsEnabled()) {
+      return res.json([]);
+    }
+
     const nowIso = new Date().toISOString();
     const expectedGroupId = String(req.groupId || "").trim();
 
@@ -156,6 +161,10 @@ router.get("/sanctions", async (req, res) => {
 
 router.get("/sanctions/search", async (req, res) => {
   try {
+    if (!isSanctionsEnabled()) {
+      return res.json([]);
+    }
+
     const q = String(req.query?.q || "").trim();
     if (!q) return res.json([]);
 
@@ -196,6 +205,10 @@ router.get("/sanctions/search", async (req, res) => {
 
 router.post("/sanctions", async (req, res) => {
   try {
+    if (!isSanctionsEnabled()) {
+      return res.json({ success: true, disabled: true });
+    }
+
     const userId = String(req.body?.userId || "").trim();
     const days = Number(req.body?.days || 7);
     const reason = String(req.body?.reason || "Sanción manual").trim() || "Sanción manual";
@@ -248,6 +261,10 @@ router.post("/sanctions", async (req, res) => {
 
 router.delete("/sanctions/:userId", async (req, res) => {
   try {
+    if (!isSanctionsEnabled()) {
+      return res.json({ success: true, disabled: true });
+    }
+
     const userId = String(req.params.userId || "").trim();
     if (!userId) {
       return res.status(400).json({ error: "userId inválido" });

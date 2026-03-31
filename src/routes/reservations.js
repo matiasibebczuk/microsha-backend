@@ -1,13 +1,18 @@
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
+const fs = require("fs");
+const path = require("path");
 const { requirePassengerSession } = require("../middleware/passengerSession");
 const { getPassengerGroupId } = require("../middleware/groupAccess");
 const { getTripGroupId, assignTripToGroup } = require("../middleware/groupStore");
 const { notifyAdminsReinforcementActivated } = require("../services/reinforcementNotifications");
 const { getSystemFlags } = require("../services/systemFlags");
 const { isWaitlistWindowActiveBySchedule, normalizeClockTime } = require("../utils/scheduleTime");
+const { isSanctionsEnabled } = require("../config/featureFlags");
 
 const router = express.Router();
+const logsDir = path.join(__dirname, "..", "..", "logs");
+const cancellationsLogPath = path.join(logsDir, "reservation-cancellations.jsonl");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -27,6 +32,33 @@ async function getTripCapacity(tripId) {
   );
 }
 
+async function appendCancellationLog(entry) {
+  try {
+    const { error } = await supabase
+      .from("trip_cancellations_log")
+      .insert({
+        canceled_at: entry.canceled_at,
+        trip_id: Number(entry.trip_id),
+        user_id: entry.user_id || null,
+        reservation_id: entry.reservation_id ? Number(entry.reservation_id) : null,
+        status_at_cancel: entry.status_at_cancel || null,
+        user_name: entry.user_name || "Sin nombre",
+        description: entry.description || "",
+      });
+
+    if (!error) return;
+    const tableMissing = error?.code === "42P01" || String(error?.message || "").toLowerCase().includes("does not exist");
+    if (!tableMissing) {
+      throw error;
+    }
+  } catch (dbError) {
+    console.warn("⚠️ CANCELLATION DB LOG FAILED, USING FILE FALLBACK:", dbError?.message || dbError);
+  }
+
+  await fs.promises.mkdir(logsDir, { recursive: true });
+  await fs.promises.appendFile(cancellationsLogPath, `${JSON.stringify(entry)}\n`, "utf8");
+}
+
 async function getPauseState() {
   const flags = await getSystemFlags();
   return {
@@ -36,6 +68,7 @@ async function getPauseState() {
 }
 
 async function getPassengerSuspension(userId) {
+  if (!isSanctionsEnabled()) return null;
   if (!userId) return null;
   const { data, error } = await supabase
     .from("users")
@@ -524,7 +557,7 @@ router.delete("/", requirePassengerSession, async (req, res) => {
 
     const { data: current, error: currentError } = await supabase
       .from("reservations")
-      .select("id, status")
+      .select("id, status, user_id, users ( name, description )")
       .eq("trip_id", tripId)
       .eq("user_id", userId)
       .maybeSingle();
@@ -547,6 +580,16 @@ router.delete("/", requirePassengerSession, async (req, res) => {
     if (deleteError) {
       return res.status(500).json({ error: deleteError.message });
     }
+
+    await appendCancellationLog({
+      canceled_at: new Date().toISOString(),
+      trip_id: tripId,
+      user_id: current.user_id || userId,
+      reservation_id: current.id,
+      status_at_cancel: current.status,
+      user_name: current.users?.name || "Sin nombre",
+      description: current.users?.description || "",
+    });
 
     let promotedReservationId = null;
     if (wasConfirmed) {

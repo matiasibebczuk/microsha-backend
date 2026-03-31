@@ -149,6 +149,43 @@ function parseJsonArray(value) {
   return [];
 }
 
+function parseClockToMinutes(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return null;
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+
+  return hours * 60 + minutes;
+}
+
+function resolveTripSortMinutes(trip) {
+  const fromFirstTime = parseClockToMinutes(trip?.first_time);
+  if (fromFirstTime !== null) return fromFirstTime;
+
+  const fromDateTime = normalizeClockTime(trip?.time || trip?.departure_datetime);
+  const parsedDateTime = parseClockToMinutes(fromDateTime);
+  if (parsedDateTime !== null) return parsedDateTime;
+
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function sortTrasladosByHora(trips) {
+  return [...(Array.isArray(trips) ? trips : [])].sort((a, b) => {
+    const diff = resolveTripSortMinutes(a) - resolveTripSortMinutes(b);
+    if (diff !== 0) return diff;
+
+    const idA = Number(a?.id);
+    const idB = Number(b?.id);
+    if (Number.isFinite(idA) && Number.isFinite(idB)) return idA - idB;
+
+    return String(a?.id || "").localeCompare(String(b?.id || ""));
+  });
+}
+
 
 
 // ========================
@@ -282,7 +319,7 @@ router.get("/", async (req, res) => {
           };
         });
 
-        return res.json(rpcResult);
+        return res.json(sortTrasladosByHora(rpcResult));
       }
 
       if (rpcError) {
@@ -428,7 +465,7 @@ router.get("/", async (req, res) => {
     // 3) CREATE INDEX IF NOT EXISTS idx_trip_stops_trip_order ON trip_stops (trip_id, order_index);
     // 4) CREATE INDEX IF NOT EXISTS idx_trip_runs_trip_finished_id ON trip_runs (trip_id, finished_at, id DESC);
 
-    return res.json(result);
+    return res.json(sortTrasladosByHora(result));
 
   } catch (err) {
     console.error("🔥 TRIPS ERROR:", err);

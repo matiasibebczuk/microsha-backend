@@ -6,6 +6,9 @@ const { requireStaffGroup, assertTripInGroup } = require("../middleware/groupAcc
 const fs = require("fs");
 const path = require("path");
 const { getNextScheduleActivationIso, normalizeClockTime } = require("../utils/scheduleTime");
+const { isSanctionsEnabled } = require("../config/featureFlags");
+const { getLastFriday20Iso } = require("../utils/fridayWindow");
+const { notifyAdminsTripFinishedSummary } = require("../services/reinforcementNotifications");
 
 const router = express.Router();
 
@@ -16,6 +19,7 @@ const supabase = createClient(
 
 const logsDir = path.join(__dirname, "..", "..", "logs");
 const attendanceLogPath = path.join(logsDir, "attendance-log.jsonl");
+const cancellationsLogPath = path.join(logsDir, "reservation-cancellations.jsonl");
 
 router.use(auth, requireRole("encargado"), requireStaffGroup);
 
@@ -56,7 +60,7 @@ async function getTripPassengers(tripId) {
       status,
       boarded,
       stop_id,
-      users ( name, phone, description ),
+      users ( name, phone, description, dni, member_number ),
       stops ( name )
     `)
     .eq("trip_id", tripId)
@@ -68,7 +72,95 @@ async function getTripPassengers(tripId) {
   return data || [];
 }
 
+function toPassengerInfo(userRow) {
+  return {
+    name: userRow?.name || "Sin nombre",
+    description: userRow?.description || "",
+  };
+}
+
+async function readLateCancellationsForTrip(tripId, finishedAtIso) {
+  const cutoffIso = getLastFriday20Iso(new Date(finishedAtIso));
+  const cutoffMs = cutoffIso ? new Date(cutoffIso).getTime() : Number.NaN;
+  const finishMs = new Date(finishedAtIso).getTime();
+  if (!Number.isFinite(cutoffMs) || !Number.isFinite(finishMs)) return [];
+
+  try {
+    const { data, error } = await supabase
+      .from("trip_cancellations_log")
+      .select("user_id, reservation_id, user_name, description, canceled_at")
+      .eq("trip_id", Number(tripId))
+      .gte("canceled_at", new Date(cutoffMs).toISOString())
+      .lte("canceled_at", new Date(finishMs).toISOString())
+      .order("canceled_at", { ascending: false })
+      .limit(500);
+
+    if (!error) {
+      const unique = new Map();
+      for (const row of Array.isArray(data) ? data : []) {
+        const key = String(row?.user_id || row?.reservation_id || row?.user_name || "");
+        if (!key || unique.has(key)) continue;
+
+        unique.set(key, {
+          name: row?.user_name || "Sin nombre",
+          description: row?.description || "",
+        });
+      }
+
+      return Array.from(unique.values());
+    }
+
+    const tableMissing = error?.code === "42P01" || String(error?.message || "").toLowerCase().includes("does not exist");
+    if (!tableMissing) {
+      throw error;
+    }
+  } catch (dbError) {
+    console.warn("⚠️ CANCELLATION DB READ FAILED, USING FILE FALLBACK:", dbError?.message || dbError);
+  }
+
+  try {
+    if (!fs.existsSync(cancellationsLogPath)) return [];
+
+    const raw = await fs.promises.readFile(cancellationsLogPath, "utf8");
+    const rows = String(raw || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    const unique = new Map();
+    for (const row of rows) {
+      if (String(row?.trip_id) !== String(tripId)) continue;
+
+      const canceledAtMs = new Date(row?.canceled_at).getTime();
+      if (!Number.isFinite(canceledAtMs)) continue;
+      if (canceledAtMs < cutoffMs || canceledAtMs > finishMs) continue;
+
+      const key = String(row?.user_id || row?.reservation_id || row?.user_name || "");
+      if (!key || unique.has(key)) continue;
+
+      unique.set(key, {
+        name: row?.user_name || "Sin nombre",
+        description: row?.description || "",
+      });
+    }
+
+    return Array.from(unique.values());
+  } catch (error) {
+    console.error("⚠️ CANCEL LOG READ ERROR:", error);
+    return [];
+  }
+}
+
 async function applyNoShowSanctions(passengers) {
+  if (!isSanctionsEnabled()) return;
   const confirmedRows = (Array.isArray(passengers) ? passengers : []).filter(
     (row) => row?.status === "confirmed" && row?.user_id
   );
@@ -566,6 +658,23 @@ router.post("/trips/:tripId/finish", async (req, res) => {
     }
 
     await applyNoShowSanctions(passengers);
+
+    const absentPassengers = passengers
+      .filter((p) => p?.status === "confirmed" && !p?.boarded)
+      .map((p) => toPassengerInfo(p?.users));
+    const lateCancellations = await readLateCancellationsForTrip(tripId, finishedAt);
+
+    try {
+      await notifyAdminsTripFinishedSummary({
+        groupId: req.groupId,
+        tripName: trip?.name || `Traslado ${tripId}`,
+        absentPassengers,
+        lateCancellations,
+        fridayCutoffLabel: "viernes 20:00 (America/Argentina/Buenos_Aires)",
+      });
+    } catch (notifyError) {
+      console.error("⚠️ TRIP FINISH EMAIL ERROR:", notifyError);
+    }
 
     const { error: cleanupError } = await supabase
       .from("reservations")
