@@ -146,7 +146,10 @@ router.post("/test-email", async (req, res) => {
     });
   } catch (err) {
     console.error("🔥 ADMIN TEST EMAIL ERROR:", err);
-    return res.status(500).json({ error: "Server exploded" });
+    return res.status(500).json({
+      error: err?.message || "Server exploded",
+      reason: "test_email_failed",
+    });
   }
 });
 
