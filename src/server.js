@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const compression = require("compression");
 
 const authRoutes = require("./routes/auth");
 const tripRoutes = require("./routes/trips");
@@ -38,6 +39,8 @@ app.use(express.json());
 app.use(cors({
   origin: resolveCorsOrigin(corsOrigin),
 }));
+app.set("etag", "weak");
+app.use(compression({ threshold: 1024 }));
 
 
 app.get("/ping", (req, res) => {
