@@ -1058,6 +1058,16 @@ router.post("/trips/:tripId/finish", async (req, res) => {
       }
     }
 
+    try {
+      await upsertLocationSession(tripId, {
+        active: false,
+        stopped_at: finishedAt,
+      });
+    } catch (locationStopError) {
+      // Do not block trip finalization if location tracking is not available.
+      console.warn("⚠️ LOCATION AUTO-STOP AFTER FINISH ERROR:", locationStopError?.message || locationStopError);
+    }
+
     return res.json({
       success: true,
       runId,
