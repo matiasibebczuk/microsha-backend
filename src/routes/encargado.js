@@ -481,6 +481,78 @@ async function appendAttendanceLog(entry) {
   await fs.promises.appendFile(attendanceLogPath, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
+async function getLocationSession(tripId) {
+  const { data, error } = await supabase
+    .from("trip_location_sessions")
+    .select("trip_id, active, started_by, started_at, stopped_at, last_latitude, last_longitude, last_accuracy_meters, last_update_at, last_stop_id, last_stop_name, last_stop_at")
+    .eq("trip_id", tripId)
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingTableError(error)) return null;
+    throw error;
+  }
+
+  return data || null;
+}
+
+async function upsertLocationSession(tripId, payload) {
+  const { error } = await supabase
+    .from("trip_location_sessions")
+    .upsert({
+      trip_id: Number(tripId),
+      updated_at: new Date().toISOString(),
+      ...payload,
+    }, { onConflict: "trip_id" });
+
+  if (error) {
+    if (isMissingTableError(error)) {
+      const migrationPath = "microsha-backend/sql/2026-04-03_trip_location_tracking.sql";
+      const migrationError = new Error(`Falta migración de ubicación en tiempo real (${migrationPath}).`);
+      migrationError.status = 409;
+      throw migrationError;
+    }
+    throw error;
+  }
+}
+
+async function saveTripLocationUpdate({ tripId, userId, latitude, longitude, accuracyMeters, metadata }) {
+  const nowIso = new Date().toISOString();
+
+  await upsertLocationSession(tripId, {
+    active: true,
+    started_by: String(userId || ""),
+    started_at: nowIso,
+    stopped_at: null,
+    last_latitude: Number(latitude),
+    last_longitude: Number(longitude),
+    last_accuracy_meters: Number.isFinite(Number(accuracyMeters)) ? Number(accuracyMeters) : null,
+    last_update_at: nowIso,
+  });
+
+  const { error: insertError } = await supabase
+    .from("trip_location_updates")
+    .insert({
+      trip_id: Number(tripId),
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      accuracy_meters: Number.isFinite(Number(accuracyMeters)) ? Number(accuracyMeters) : null,
+      recorded_at: nowIso,
+      source_user_id: String(userId || ""),
+      metadata: metadata && typeof metadata === "object" ? metadata : {},
+    });
+
+  if (insertError) {
+    if (isMissingTableError(insertError)) {
+      const migrationPath = "microsha-backend/sql/2026-04-03_trip_location_tracking.sql";
+      const migrationError = new Error(`Falta migración de ubicación en tiempo real (${migrationPath}).`);
+      migrationError.status = 409;
+      throw migrationError;
+    }
+    throw insertError;
+  }
+}
+
 router.post("/trips/:tripId/start", async (req, res) => {
   try {
     const { tripId } = req.params;
@@ -624,6 +696,117 @@ router.get("/trips/:tripId/state", async (req, res) => {
   }
 });
 
+router.get("/trips/:tripId/location/state", async (req, res) => {
+  try {
+    const { tripId } = req.params;
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const session = await getLocationSession(tripId);
+    return res.json({
+      active: Boolean(session?.active),
+      started_by: session?.started_by || null,
+      started_at: session?.started_at || null,
+      stopped_at: session?.stopped_at || null,
+      last_update_at: session?.last_update_at || null,
+      last_stop_name: session?.last_stop_name || null,
+      last_stop_at: session?.last_stop_at || null,
+    });
+  } catch (err) {
+    const status = Number(err?.status || 500);
+    console.error("🔥 LOCATION STATE ERROR:", err);
+    return res.status(Number.isFinite(status) ? status : 500).json({ error: err?.message || "Server exploded" });
+  }
+});
+
+router.post("/trips/:tripId/location/start", async (req, res) => {
+  try {
+    const { tripId } = req.params;
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const nowIso = new Date().toISOString();
+    await upsertLocationSession(tripId, {
+      active: true,
+      started_by: String(req.user.id || ""),
+      started_at: nowIso,
+      stopped_at: null,
+    });
+
+    return res.json({ success: true, active: true, started_at: nowIso });
+  } catch (err) {
+    const status = Number(err?.status || 500);
+    console.error("🔥 LOCATION START ERROR:", err);
+    return res.status(Number.isFinite(status) ? status : 500).json({ error: err?.message || "Server exploded" });
+  }
+});
+
+router.post("/trips/:tripId/location/stop", async (req, res) => {
+  try {
+    const { tripId } = req.params;
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const nowIso = new Date().toISOString();
+    await upsertLocationSession(tripId, {
+      active: false,
+      stopped_at: nowIso,
+    });
+
+    return res.json({ success: true, active: false, stopped_at: nowIso });
+  } catch (err) {
+    const status = Number(err?.status || 500);
+    console.error("🔥 LOCATION STOP ERROR:", err);
+    return res.status(Number.isFinite(status) ? status : 500).json({ error: err?.message || "Server exploded" });
+  }
+});
+
+router.post("/trips/:tripId/location/update", async (req, res) => {
+  try {
+    const { tripId } = req.params;
+    const latitude = Number(req.body?.latitude);
+    const longitude = Number(req.body?.longitude);
+    const accuracyMeters = Number(req.body?.accuracy_meters);
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return res.status(400).json({ error: "Coordenadas inválidas" });
+    }
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    await saveTripLocationUpdate({
+      tripId,
+      userId: req.user.id,
+      latitude,
+      longitude,
+      accuracyMeters,
+      metadata: {
+        heading: Number(req.body?.heading),
+        speed: Number(req.body?.speed),
+        provider: "web_geolocation",
+      },
+    });
+
+    return res.json({ success: true, active: true, last_update_at: new Date().toISOString() });
+  } catch (err) {
+    const status = Number(err?.status || 500);
+    console.error("🔥 LOCATION UPDATE ERROR:", err);
+    return res.status(Number.isFinite(status) ? status : 500).json({ error: err?.message || "Server exploded" });
+  }
+});
+
 router.get("/trips/:tripId/passengers", async (req, res) => {
   try {
     const { tripId } = req.params;
@@ -650,7 +833,7 @@ router.put("/reservations/:reservationId/boarded", async (req, res) => {
 
     const { data: reservation, error: reservationError } = await supabase
       .from("reservations")
-      .select("id, trip_id")
+      .select("id, trip_id, stop_id, stops(name)")
       .eq("id", reservationId)
       .maybeSingle();
 
@@ -695,6 +878,18 @@ router.put("/reservations/:reservationId/boarded", async (req, res) => {
       });
     } catch (logErr) {
       console.error("⚠️ ATTENDANCE LOG ERROR:", logErr);
+    }
+
+    if (boarded) {
+      try {
+        await upsertLocationSession(reservation.trip_id, {
+          last_stop_id: reservation?.stop_id || null,
+          last_stop_name: reservation?.stops?.name || "Sin parada",
+          last_stop_at: new Date().toISOString(),
+        });
+      } catch (locationErr) {
+        console.error("⚠️ LOCATION LAST STOP UPDATE ERROR:", locationErr);
+      }
     }
 
     return res.json({ success: true, boarded });

@@ -156,6 +156,39 @@ function isMissingTableError(error) {
   return message.includes("does not exist") || message.includes("relation") || message.includes("tabla");
 }
 
+async function getActiveLocationSessionsMap(tripIds) {
+  const cleanIds = (Array.isArray(tripIds) ? tripIds : [])
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id));
+
+  if (cleanIds.length === 0) return new Map();
+
+  const { data, error } = await supabase
+    .from("trip_location_sessions")
+    .select("trip_id, active, last_latitude, last_longitude, last_update_at, last_stop_name, last_stop_at")
+    .in("trip_id", cleanIds)
+    .eq("active", true);
+
+  if (error) {
+    if (isMissingTableError(error)) return new Map();
+    throw error;
+  }
+
+  return new Map(
+    (Array.isArray(data) ? data : []).map((row) => [
+      Number(row.trip_id),
+      {
+        active: Boolean(row.active),
+        last_latitude: row.last_latitude ?? null,
+        last_longitude: row.last_longitude ?? null,
+        last_update_at: row.last_update_at || null,
+        last_stop_name: row.last_stop_name || null,
+        last_stop_at: row.last_stop_at || null,
+      },
+    ])
+  );
+}
+
 async function backupTripHistoryBeforeDelete({ tripId, groupId }) {
   const { data: trip, error: tripError } = await supabase
     .from("trips")
@@ -447,6 +480,7 @@ router.get("/", async (req, res) => {
       });
 
       if (!rpcError && Array.isArray(rpcRows)) {
+        const locationMap = await getActiveLocationSessionsMap(rpcTripIds);
         const rpcIds = rpcRows
           .map((row) => Number(row.id))
           .filter((id) => Number.isFinite(id));
@@ -473,6 +507,7 @@ router.get("/", async (req, res) => {
         );
 
         const rpcResult = rpcRows.map((row) => {
+          const location = locationMap.get(Number(row.id)) || null;
           const waitlistRange = waitlistMap.get(Number(row.id)) || {
             start: null,
             end: null,
@@ -515,6 +550,12 @@ router.get("/", async (req, res) => {
             waitlist_end_day: waitlistRange.endDay,
             waitlist_end_time: waitlistRange.endTime,
             waitlist_active: waitlistActive,
+            location_active: Boolean(location?.active),
+            location_last_latitude: location?.last_latitude ?? null,
+            location_last_longitude: location?.last_longitude ?? null,
+            location_last_update_at: location?.last_update_at || null,
+            location_last_stop_name: location?.last_stop_name || null,
+            location_last_stop_at: location?.last_stop_at || null,
             trips_paused: Boolean(systemFlags?.tripsPaused),
             trips_pause_message: String(systemFlags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
           };
@@ -541,6 +582,7 @@ router.get("/", async (req, res) => {
       capacitiesResult,
       firstStopsResult,
       runsResult,
+      locationSessionsResult,
     ] = await Promise.all([
       supabase
         .from("trips")
@@ -567,6 +609,11 @@ router.get("/", async (req, res) => {
         .select("trip_id, id, started_at, finished_at")
         .in("trip_id", mergedTripIds)
         .order("id", { ascending: false }),
+      supabase
+        .from("trip_location_sessions")
+        .select("trip_id, active, last_latitude, last_longitude, last_update_at, last_stop_name, last_stop_at")
+        .in("trip_id", mergedTripIds)
+        .eq("active", true),
     ]);
 
     throwIfSupabaseError(tripsResult.error, "trips query failed");
@@ -574,12 +621,16 @@ router.get("/", async (req, res) => {
     throwIfSupabaseError(capacitiesResult.error, "capacity query failed");
     throwIfSupabaseError(firstStopsResult.error, "first stop query failed");
     throwIfSupabaseError(runsResult.error, "runs query failed");
+    if (locationSessionsResult.error && !isMissingTableError(locationSessionsResult.error)) {
+      throw locationSessionsResult.error;
+    }
 
     const trips = Array.isArray(tripsResult.data) ? tripsResult.data : [];
     const reservations = Array.isArray(reservationsResult.data) ? reservationsResult.data : [];
     const capacities = Array.isArray(capacitiesResult.data) ? capacitiesResult.data : [];
     const firstStops = Array.isArray(firstStopsResult.data) ? firstStopsResult.data : [];
     const runs = Array.isArray(runsResult.data) ? runsResult.data : [];
+    const locationSessions = Array.isArray(locationSessionsResult.data) ? locationSessionsResult.data : [];
 
     const reservationMap = new Map();
     for (const row of reservations) {
@@ -609,6 +660,7 @@ router.get("/", async (req, res) => {
 
     const activeRunMap = new Map();
     const finishedRunMap = new Map();
+    const locationMap = new Map();
 
     for (const row of runs) {
       const key = String(row.trip_id);
@@ -622,11 +674,18 @@ router.get("/", async (req, res) => {
       }
     }
 
+    for (const row of locationSessions) {
+      const key = String(row.trip_id);
+      if (locationMap.has(key)) continue;
+      locationMap.set(key, row);
+    }
+
     const result = trips.map((trip) => {
       const key = String(trip.id);
       const counts = reservationMap.get(key) || { confirmed: 0, waiting: 0 };
       const capacity = capacityMap.get(key) || 0;
       const waitlistActive = isWaitlistWindowActive(trip);
+      const location = locationMap.get(key) || null;
 
       return {
         id: trip.id,
@@ -655,6 +714,12 @@ router.get("/", async (req, res) => {
         waitlist_end_day: trip.waitlist_end_day ?? null,
         waitlist_end_time: normalizeClockTime(trip.waitlist_end_time) || null,
         waitlist_active: waitlistActive,
+        location_active: Boolean(location?.active),
+        location_last_latitude: location?.last_latitude ?? null,
+        location_last_longitude: location?.last_longitude ?? null,
+        location_last_update_at: location?.last_update_at || null,
+        location_last_stop_name: location?.last_stop_name || null,
+        location_last_stop_at: location?.last_stop_at || null,
         trips_paused: Boolean(systemFlags?.tripsPaused),
         trips_pause_message: String(systemFlags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
       };
@@ -722,6 +787,62 @@ router.get("/:id/stops", async (req, res) => {
   } catch (err) {
     console.error("🔥 STOPS ERROR:", err);
     res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.get("/:id/location", async (req, res) => {
+  try {
+    const tripId = req.params.id;
+
+    const context = await resolveRequestGroupId(req);
+    if (!context.groupId) {
+      return res.status(context.status || 401).json({ error: context.error || "No group context" });
+    }
+
+    const allowed = await assertTripInGroup(tripId, context.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para ver este viaje" });
+    }
+
+    const { data: session, error: sessionError } = await supabase
+      .from("trip_location_sessions")
+      .select("trip_id, active, started_by, started_at, stopped_at, last_latitude, last_longitude, last_accuracy_meters, last_update_at, last_stop_id, last_stop_name, last_stop_at")
+      .eq("trip_id", tripId)
+      .maybeSingle();
+
+    if (sessionError) {
+      if (isMissingTableError(sessionError)) {
+        return res.json({ active: false, updates: [] });
+      }
+      return res.status(500).json({ error: sessionError.message });
+    }
+
+    const { data: updates, error: updatesError } = await supabase
+      .from("trip_location_updates")
+      .select("latitude, longitude, accuracy_meters, recorded_at, source_user_id")
+      .eq("trip_id", tripId)
+      .order("recorded_at", { ascending: false })
+      .limit(100);
+
+    if (updatesError) {
+      if (!isMissingTableError(updatesError)) {
+        return res.status(500).json({ error: updatesError.message });
+      }
+      return res.json({
+        active: Boolean(session?.active),
+        session: session || null,
+        updates: [],
+      });
+    }
+
+    return res.json({
+      active: Boolean(session?.active),
+      session: session || null,
+      updates: Array.isArray(updates) ? updates : [],
+    });
+  } catch (err) {
+    console.error("🔥 TRIP LOCATION ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
   }
 });
 
