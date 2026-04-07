@@ -200,6 +200,19 @@ router.post("/passenger-login", async (req, res) => {
     }
 
     if (!Array.isArray(users) || users.length === 0) {
+      const { data: dniMatches, error: dniCheckError } = await supabase
+        .from("users")
+        .select("id")
+        .eq("dni", dni)
+        .limit(1);
+
+      if (!dniCheckError && Array.isArray(dniMatches) && dniMatches.length > 0) {
+        return res.status(401).json({
+          error: "Número de socio incorrecto",
+          hintMemberNumberZero: true,
+        });
+      }
+
       return res.status(401).json({ error: "Datos incorrectos" });
     }
 
