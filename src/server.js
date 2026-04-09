@@ -17,7 +17,7 @@ const groupsRoutes = require("./routes/groups");
 
 const app = express();   // ✅ primero crear
 const port = Number(process.env.PORT || 3000);
-const corsOrigin = process.env.CORS_ORIGIN || "*";
+const corsOrigin = process.env.CORS_ORIGIN || "https://microsha.vercel.app";
 
 function resolveCorsOrigin(value) {
   if (!value || value === "*") return true;
@@ -38,6 +38,10 @@ if (missingEnv.length > 0) {
 app.use(express.json());
 app.use(cors({
   origin: resolveCorsOrigin(corsOrigin),
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 200
 }));
 app.set("etag", "weak");
 app.use(compression({ threshold: 1024 }));
