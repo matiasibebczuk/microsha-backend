@@ -1,7 +1,7 @@
 create table if not exists public.system_settings (
   id integer primary key,
   trips_paused boolean not null default false,
-  pause_message text not null default 'En mantenimiento, prueba mas tarde',
+  pause_message text not null default 'Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera',
   scheduled_pause_enabled boolean not null default false,
   scheduled_pause_day integer null,
   scheduled_pause_time text null,

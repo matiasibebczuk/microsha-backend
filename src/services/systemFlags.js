@@ -15,7 +15,7 @@ const supabase = createClient(
 
 const DEFAULT_FLAGS = {
   tripsPaused: false,
-  pauseMessage: "En mantenimiento, prueba mas tarde",
+  pauseMessage: "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera",
   scheduledPauseEnabled: false,
   scheduledPauseDay: null,
   scheduledPauseTime: null,

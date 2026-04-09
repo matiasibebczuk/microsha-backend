@@ -111,7 +111,7 @@ router.put("/system/flags", async (req, res) => {
 
     const flags = await setSystemFlags({
       ...(tripsPaused !== undefined ? { tripsPaused: Boolean(tripsPaused) } : {}),
-      ...(pauseMessage !== undefined ? { pauseMessage: String(pauseMessage || "").trim() || "En mantenimiento, prueba mas tarde" } : {}),
+      ...(pauseMessage !== undefined ? { pauseMessage: String(pauseMessage || "").trim() || "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera" } : {}),
       ...(scheduledPauseEnabled !== undefined ? { scheduledPauseEnabled: Boolean(scheduledPauseEnabled) } : {}),
       ...(scheduledPauseDay !== undefined ? { scheduledPauseDay } : {}),
       ...(scheduledPauseTime !== undefined ? { scheduledPauseTime } : {}),

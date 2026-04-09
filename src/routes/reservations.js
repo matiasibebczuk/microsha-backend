@@ -63,7 +63,7 @@ async function getPauseState() {
   const flags = await getSystemFlags();
   return {
     paused: Boolean(flags?.tripsPaused),
-    message: String(flags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
+    message: String(flags?.pauseMessage || "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera"),
   };
 }
 

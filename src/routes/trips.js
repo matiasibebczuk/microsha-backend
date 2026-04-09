@@ -557,7 +557,7 @@ router.get("/", async (req, res) => {
             location_last_stop_name: location?.last_stop_name || null,
             location_last_stop_at: location?.last_stop_at || null,
             trips_paused: Boolean(systemFlags?.tripsPaused),
-            trips_pause_message: String(systemFlags?.pauseMessage || "En mantenimiento, prueba mas tarde"),
+            trips_pause_message: String(systemFlags?.pauseMessage || "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera"),
           };
         });
 
