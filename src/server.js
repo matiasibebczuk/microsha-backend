@@ -17,16 +17,26 @@ const groupsRoutes = require("./routes/groups");
 
 const app = express();   // ✅ primero crear
 const port = Number(process.env.PORT || 3000);
-const corsOrigin = process.env.CORS_ORIGIN || "https://microsha.vercel.app";
+const corsOrigin = process.env.CORS_ORIGIN || "*";
 
 function resolveCorsOrigin(value) {
-  if (!value || value === "*") return true;
+  if (!value || value === "*" || value === true) return true;
   const values = String(value)
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
   return values.length <= 1 ? values[0] : values;
 }
+
+const corsOptions = {
+  origin: resolveCorsOrigin(corsOrigin),
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-passenger-token', 'x-access-token', 'x-requested-with'],
+  exposedHeaders: ['Content-Length', 'X-JSON-Response', 'x-passenger-token'],
+  optionsSuccessStatus: 200,
+  maxAge: 86400,
+};
 
 const missingEnv = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "PASSENGER_TOKEN_SECRET"].filter(
   (key) => !process.env[key]
@@ -36,15 +46,8 @@ if (missingEnv.length > 0) {
 }
 
 app.use(express.json());
-app.use(cors({
-  origin: resolveCorsOrigin(corsOrigin),
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-passenger-token', 'x-access-token', 'x-requested-with'],
-  exposedHeaders: ['Content-Length', 'X-JSON-Response', 'x-passenger-token'],
-  optionsSuccessStatus: 200,
-  maxAge: 86400
-}));
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.set("etag", "weak");
 app.use(compression({ threshold: 1024 }));
 
