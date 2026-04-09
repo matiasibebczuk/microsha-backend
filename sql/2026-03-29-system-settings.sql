@@ -19,5 +19,5 @@ insert into public.system_settings (
   scheduled_pause_time,
   scheduled_pause_last_trigger_week
 )
-values (1, false, 'En mantenimiento, prueba mas tarde', false, null, null, null)
+values (1, false, 'Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera', false, null, null, null)
 on conflict (id) do nothing;
