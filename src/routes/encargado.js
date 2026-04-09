@@ -222,14 +222,17 @@ async function applyNoShowSanctions(passengers) {
 async function getTripStopTimes(tripId) {
   const { data, error } = await supabase
     .from("trip_stops")
-    .select("stop_id, pickup_time")
+    .select("stop_id, pickup_time, order_index")
     .eq("trip_id", tripId);
 
   if (error) throw error;
 
   const result = {};
   for (const row of data || []) {
-    result[row.stop_id] = normalizeClockTime(row.pickup_time) || null;
+    result[row.stop_id] = {
+      time: normalizeClockTime(row.pickup_time) || null,
+      order: Number(row.order_index || 0) || 0,
+    };
   }
 
   return result;
@@ -240,12 +243,14 @@ function groupPassengersByStop(passengers, timeMap) {
 
   for (const p of passengers) {
     const stopId = p.stop_id;
+    const stopInfo = timeMap[stopId] || { time: null, order: 0 };
 
     if (!grouped[stopId]) {
       grouped[stopId] = {
         stopId,
         stop: p.stops?.name || "Sin parada",
-        time: timeMap[stopId] || null,
+        time: stopInfo.time,
+        order: stopInfo.order,
         passengers: [],
       };
     }
@@ -260,7 +265,19 @@ function groupPassengersByStop(passengers, timeMap) {
     });
   }
 
-  return Object.values(grouped);
+  return Object.values(grouped).sort((a, b) => {
+    if (a.order !== b.order) return a.order - b.order;
+    if (a.time && b.time) {
+      const [aH, aM] = a.time.split(":").map(Number);
+      const [bH, bM] = b.time.split(":").map(Number);
+      const aMinutes = (Number.isFinite(aH) ? aH : 0) * 60 + (Number.isFinite(aM) ? aM : 0);
+      const bMinutes = (Number.isFinite(bH) ? bH : 0) * 60 + (Number.isFinite(bM) ? bM : 0);
+      if (aMinutes !== bMinutes) return aMinutes - bMinutes;
+    }
+    if (a.time && !b.time) return -1;
+    if (!a.time && b.time) return 1;
+    return String(a.stop || "").localeCompare(String(b.stop || ""), undefined, { numeric: true, sensitivity: "base" });
+  });
 }
 
 async function getTripById(tripId) {
