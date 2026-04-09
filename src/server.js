@@ -45,8 +45,9 @@ if (missingEnv.length > 0) {
   console.error("[startup] Missing env variables:", missingEnv.join(", "));
 }
 
-app.use(express.json());
 app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+app.use(express.json());
 app.set("etag", "weak");
 app.use(compression({ threshold: 1024 }));
 
