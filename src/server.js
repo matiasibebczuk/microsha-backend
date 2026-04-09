@@ -40,8 +40,10 @@ app.use(cors({
   origin: resolveCorsOrigin(corsOrigin),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  optionsSuccessStatus: 200
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-passenger-token', 'x-access-token', 'x-requested-with'],
+  exposedHeaders: ['Content-Length', 'X-JSON-Response', 'x-passenger-token'],
+  optionsSuccessStatus: 200,
+  maxAge: 86400
 }));
 app.set("etag", "weak");
 app.use(compression({ threshold: 1024 }));
