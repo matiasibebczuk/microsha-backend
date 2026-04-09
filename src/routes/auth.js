@@ -1,0 +1,333 @@
+const express = require("express");
+const { issuePassengerToken } = require("../middleware/passengerSession");
+const { requirePassengerSession } = require("../middleware/passengerSession");
+const { supabase } = require("../lib/supabaseClient");
+const { isSanctionsEnabled } = require("../config/featureFlags");
+
+const router = express.Router();
+
+function maskIdentifier(value, visible = 3) {
+  const text = String(value || "");
+  if (!text) return "";
+  if (text.length <= visible) return text;
+  return `${text.slice(0, visible)}***`;
+}
+
+const PHONE_REGEX = /^11\d{8}$/;
+
+function normalizePhone(value) {
+  return String(value || "").replace(/\D/g, "").trim();
+}
+
+function normalizeDescription(value) {
+  return String(value || "").trim();
+}
+
+function isPassengerProfileComplete(user) {
+  const phone = normalizePhone(user?.phone);
+  const description = normalizeDescription(user?.description);
+  return PHONE_REGEX.test(phone) && description.length > 0;
+}
+
+const withTimeout = async (promise, ms, label) => {
+  let timeoutId;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timeout`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+router.post("/register-staff", async (req, res) => {
+  try {
+    const { name, lastname, email, password, role } = req.body || {};
+
+    if (!name || !lastname || !email || !password || !role) {
+      return res.status(400).json({ error: "Faltan datos" });
+    }
+
+    const normalizedRole = String(role).toLowerCase().trim();
+    if (!["admin", "encargado"].includes(normalizedRole)) {
+      return res.status(400).json({ error: "Rol inválido" });
+    }
+
+    if (String(password).length < 6) {
+      return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+    }
+
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    const { data: createdUser, error: createError } = await withTimeout(
+      supabase.auth.admin.createUser({
+        email: normalizedEmail,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          name,
+          lastname,
+          role: normalizedRole,
+        },
+        app_metadata: {
+          role: normalizedRole,
+        },
+      }),
+      10000,
+      "createUser"
+    );
+
+    if (createError || !createdUser?.user) {
+      const isDuplicate = createError?.message?.toLowerCase().includes("already") ||
+        createError?.message?.toLowerCase().includes("exists");
+
+      return res.status(isDuplicate ? 409 : 500).json({
+        error: createError?.message || "No se pudo crear el usuario",
+      });
+    }
+
+    const authUserId = createdUser.user.id;
+
+    const { error: profileError } = await withTimeout(
+      supabase
+        .from("profiles")
+        .upsert(
+          {
+            id: authUserId,
+            name,
+            lastname,
+            role: normalizedRole,
+          },
+          { onConflict: "id" }
+        ),
+      10000,
+      "profiles upsert"
+    );
+
+    if (profileError) {
+      await supabase.auth.admin.deleteUser(authUserId);
+      return res.status(500).json({ error: profileError.message });
+    }
+
+    return res.status(201).json({
+      id: authUserId,
+      name,
+      lastname,
+      email: normalizedEmail,
+      role: normalizedRole,
+    });
+
+  } catch (err) {
+    console.error("🔥 REGISTER STAFF ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.post("/passenger", async (req, res) => {
+  try {
+    console.log("REQ BODY:", req.body);
+
+    const { dni, memberNumber } = req.body || {};
+
+    console.log("DNI RAW:", dni);
+    console.log("SOCIO RAW:", memberNumber);
+
+    if (!dni || !memberNumber) {
+      console.log("❌ Missing data");
+      return res.status(400).json({ error: "Missing data" });
+    }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id, name, role, dni, member_number")
+      .eq("dni", dni)
+      .eq("member_number", memberNumber);
+
+    console.log("USERS FOUND:", user);
+    console.log("ERROR:", error);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    if (!user || user.length === 0) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // tomamos el primero
+    return res.json(user[0]);
+
+  } catch (err) {
+    console.error("🔥 SERVER ERROR:", err);
+    res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.post("/passenger-login", async (req, res) => {
+  try {
+    const { dni, memberNumber } = req.body;
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    console.info("[auth][passenger-login] attempt", {
+      requestId,
+      dniPrefix: maskIdentifier(dni),
+      memberPrefix: maskIdentifier(memberNumber),
+    });
+
+    if (!dni || !memberNumber) {
+      console.warn("[auth][passenger-login] missing data", { requestId });
+      return res.status(400).json({ error: "Missing data" });
+    }
+
+    const { data: users, error } = await supabase
+      .from("users")
+      .select("id, name, role, phone, description, suspended_until, suspension_reason")
+      .eq("dni", dni)
+      .eq("member_number", memberNumber)
+      .limit(2);
+
+    if (error) {
+      console.warn("[auth][passenger-login] query error", {
+        requestId,
+        error: error?.message || null,
+      });
+      return res.status(500).json({ error: "No se pudo validar el acceso" });
+    }
+
+    if (!Array.isArray(users) || users.length === 0) {
+      const { data: dniMatches, error: dniCheckError } = await supabase
+        .from("users")
+        .select("id")
+        .eq("dni", dni)
+        .limit(1);
+
+      if (!dniCheckError && Array.isArray(dniMatches) && dniMatches.length > 0) {
+        return res.status(401).json({
+          error: "Número de socio incorrecto",
+          hintMemberNumberZero: true,
+        });
+      }
+
+      return res.status(401).json({ error: "Datos incorrectos" });
+    }
+
+    if (users.length > 1) {
+      console.warn("[auth][passenger-login] duplicate account rows", {
+        requestId,
+        matches: users.length,
+      });
+    }
+
+    const user = users[0];
+
+    if (isSanctionsEnabled() && user?.suspended_until && new Date(user.suspended_until).getTime() > Date.now()) {
+      const untilLabel = new Date(user.suspended_until).toLocaleString("es-AR", {
+        timeZone: "America/Argentina/Buenos_Aires",
+      });
+      const reasonLabel = user.suspension_reason || "2 faltas seguidas";
+      return res.status(403).json({
+        error: `Cuenta sancionada hasta ${untilLabel} por ${reasonLabel}`,
+        suspendedUntil: user.suspended_until,
+        reason: reasonLabel,
+      });
+    }
+
+    const passengerToken = issuePassengerToken(user.id);
+
+    const normalizedPhone = normalizePhone(user.phone);
+    const normalizedDescription = normalizeDescription(user.description);
+    const needsProfileCompletion = !isPassengerProfileComplete({
+      phone: normalizedPhone,
+      description: normalizedDescription,
+    });
+
+    console.info("[auth][passenger-login] success", {
+      requestId,
+      userId: user.id,
+      needsProfileCompletion,
+    });
+
+    res.json({
+      ...user,
+      phone: normalizedPhone || null,
+      description: normalizedDescription || "",
+      needsProfileCompletion,
+      passengerToken,
+    });
+
+  } catch (err) {
+    console.error("[auth][passenger-login] fatal", {
+      message: err?.message || "unknown",
+      stack: err?.stack || null,
+    });
+    res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.get("/supabase-health", async (req, res) => {
+  try {
+    const startedAt = Date.now();
+    const { error } = await withTimeout(
+      supabase
+        .from("users")
+        .select("id", { head: true, count: "exact" })
+        .limit(1),
+      5000,
+      "supabase-health"
+    );
+
+    if (error) {
+      console.error("[auth][supabase-health] query failed", { message: error.message });
+      return res.status(503).json({ ok: false, error: error.message, latencyMs: Date.now() - startedAt });
+    }
+
+    return res.json({ ok: true, latencyMs: Date.now() - startedAt });
+  } catch (err) {
+    console.error("[auth][supabase-health] fatal", { message: err?.message || "unknown" });
+    return res.status(503).json({ ok: false, error: err?.message || "health check failed" });
+  }
+});
+
+router.put("/passenger-profile", requirePassengerSession, async (req, res) => {
+  try {
+    const userId = req.passengerUserId;
+    const phone = normalizePhone(req.body?.phone);
+    const description = normalizeDescription(req.body?.description);
+
+    if (!PHONE_REGEX.test(phone)) {
+      return res.status(400).json({
+        error: "El teléfono debe empezar con 11 y tener 10 dígitos en total",
+      });
+    }
+
+    if (!description) {
+      return res.status(400).json({ error: "La descripción es obligatoria" });
+    }
+
+    const { data: updatedUser, error } = await supabase
+      .from("users")
+      .update({ phone, description })
+      .eq("id", userId)
+      .select("id, name, role, phone, description")
+      .single();
+
+    if (error || !updatedUser) {
+      return res.status(500).json({ error: error?.message || "No se pudo actualizar el perfil" });
+    }
+
+    return res.json({
+      ...updatedUser,
+      needsProfileCompletion: false,
+    });
+  } catch (err) {
+    console.error("🔥 PASSENGER PROFILE ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+module.exports = router;
