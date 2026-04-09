@@ -46,7 +46,6 @@ if (missingEnv.length > 0) {
 }
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
 app.use(express.json());
 app.set("etag", "weak");
 app.use(compression({ threshold: 1024 }));
