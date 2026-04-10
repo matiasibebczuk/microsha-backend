@@ -108,6 +108,9 @@ router.put("/system/flags", async (req, res) => {
     const scheduledPauseEnabled = req.body?.scheduledPauseEnabled;
     const scheduledPauseDay = req.body?.scheduledPauseDay;
     const scheduledPauseTime = req.body?.scheduledPauseTime;
+    const scheduledOpenEnabled = req.body?.scheduledOpenEnabled;
+    const scheduledOpenDay = req.body?.scheduledOpenDay;
+    const scheduledOpenTime = req.body?.scheduledOpenTime;
 
     const flags = await setSystemFlags({
       ...(tripsPaused !== undefined ? { tripsPaused: Boolean(tripsPaused) } : {}),
@@ -115,6 +118,9 @@ router.put("/system/flags", async (req, res) => {
       ...(scheduledPauseEnabled !== undefined ? { scheduledPauseEnabled: Boolean(scheduledPauseEnabled) } : {}),
       ...(scheduledPauseDay !== undefined ? { scheduledPauseDay } : {}),
       ...(scheduledPauseTime !== undefined ? { scheduledPauseTime } : {}),
+      ...(scheduledOpenEnabled !== undefined ? { scheduledOpenEnabled: Boolean(scheduledOpenEnabled) } : {}),
+      ...(scheduledOpenDay !== undefined ? { scheduledOpenDay } : {}),
+      ...(scheduledOpenTime !== undefined ? { scheduledOpenTime } : {}),
     });
 
     return res.json(flags);

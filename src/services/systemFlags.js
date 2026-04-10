@@ -20,6 +20,10 @@ const DEFAULT_FLAGS = {
   scheduledPauseDay: null,
   scheduledPauseTime: null,
   scheduledPauseLastTriggerWeek: null,
+  scheduledOpenEnabled: false,
+  scheduledOpenDay: null,
+  scheduledOpenTime: null,
+  scheduledOpenLastTriggerWeek: null,
 };
 
 function parseTimeToMinutes(value) {
@@ -93,18 +97,27 @@ function getCurrentArgentinaWeekKey() {
 }
 
 function normalizeFlags(raw) {
-  const day = raw?.scheduledPauseDay;
-  const normalizedDay = day === null || day === undefined || day === "" ? null : Number(day);
-  const validDay = Number.isInteger(normalizedDay) && normalizedDay >= 0 && normalizedDay <= 6 ? normalizedDay : null;
-  const normalizedTime = normalizeClockTime(raw?.scheduledPauseTime);
+  const pauseDay = raw?.scheduledPauseDay;
+  const normalizedPauseDay = pauseDay === null || pauseDay === undefined || pauseDay === "" ? null : Number(pauseDay);
+  const validPauseDay = Number.isInteger(normalizedPauseDay) && normalizedPauseDay >= 0 && normalizedPauseDay <= 6 ? normalizedPauseDay : null;
+  const normalizedPauseTime = normalizeClockTime(raw?.scheduledPauseTime);
+
+  const openDay = raw?.scheduledOpenDay;
+  const normalizedOpenDay = openDay === null || openDay === undefined || openDay === "" ? null : Number(openDay);
+  const validOpenDay = Number.isInteger(normalizedOpenDay) && normalizedOpenDay >= 0 && normalizedOpenDay <= 6 ? normalizedOpenDay : null;
+  const normalizedOpenTime = normalizeClockTime(raw?.scheduledOpenTime);
 
   return {
     tripsPaused: Boolean(raw?.tripsPaused),
     pauseMessage: String(raw?.pauseMessage || DEFAULT_FLAGS.pauseMessage),
-    scheduledPauseEnabled: Boolean(raw?.scheduledPauseEnabled) && validDay !== null && Boolean(normalizedTime),
-    scheduledPauseDay: validDay,
-    scheduledPauseTime: normalizedTime,
+    scheduledPauseEnabled: Boolean(raw?.scheduledPauseEnabled) && validPauseDay !== null && Boolean(normalizedPauseTime),
+    scheduledPauseDay: validPauseDay,
+    scheduledPauseTime: normalizedPauseTime,
     scheduledPauseLastTriggerWeek: raw?.scheduledPauseLastTriggerWeek ? String(raw.scheduledPauseLastTriggerWeek) : null,
+    scheduledOpenEnabled: Boolean(raw?.scheduledOpenEnabled) && validOpenDay !== null && Boolean(normalizedOpenTime),
+    scheduledOpenDay: validOpenDay,
+    scheduledOpenTime: normalizedOpenTime,
+    scheduledOpenLastTriggerWeek: raw?.scheduledOpenLastTriggerWeek ? String(raw.scheduledOpenLastTriggerWeek) : null,
   };
 }
 
@@ -143,6 +156,37 @@ async function applyScheduledPauseIfDueWithSaver(flags, saveFn) {
   return { flags: next, changed: true };
 }
 
+async function applyScheduledOpenIfDueWithSaver(flags, saveFn) {
+  if (!flags?.scheduledOpenEnabled) return { flags, changed: false };
+  if (flags.scheduledOpenDay === null || !flags.scheduledOpenTime) return { flags, changed: false };
+
+  const now = getArgentinaNowParts();
+  if (now.weekday === null) return { flags, changed: false };
+
+  const targetMinutes = parseTimeToMinutes(flags.scheduledOpenTime);
+  if (targetMinutes === null) return { flags, changed: false };
+
+  const currentWeekKey = getCurrentArgentinaWeekKey();
+  if (!currentWeekKey) return { flags, changed: false };
+
+  const targetWeekMinutes = flags.scheduledOpenDay * 1440 + targetMinutes;
+  const dueThisWeek = now.weekMinutes >= targetWeekMinutes;
+  const alreadyTriggeredThisWeek = flags.scheduledOpenLastTriggerWeek === currentWeekKey;
+
+  if (!dueThisWeek || alreadyTriggeredThisWeek) {
+    return { flags, changed: false };
+  }
+
+  const next = {
+    ...flags,
+    tripsPaused: false,
+    scheduledOpenLastTriggerWeek: currentWeekKey,
+  };
+
+  await saveFn(next);
+  return { flags: next, changed: true };
+}
+
 async function readFlagsFromFile() {
   await fs.promises.mkdir(dataDir, { recursive: true });
 
@@ -174,7 +218,7 @@ function isTableMissingError(error) {
 async function readFlagsFromDb() {
   const { data, error } = await supabase
     .from("system_settings")
-    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week")
+    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week, scheduled_open_enabled, scheduled_open_day, scheduled_open_time, scheduled_open_last_trigger_week")
     .eq("id", FLAGS_ROW_ID)
     .maybeSingle();
 
@@ -198,6 +242,10 @@ async function readFlagsFromDb() {
       scheduledPauseDay: data.scheduled_pause_day,
       scheduledPauseTime: data.scheduled_pause_time,
       scheduledPauseLastTriggerWeek: data.scheduled_pause_last_trigger_week,
+      scheduledOpenEnabled: data.scheduled_open_enabled,
+      scheduledOpenDay: data.scheduled_open_day,
+      scheduledOpenTime: data.scheduled_open_time,
+      scheduledOpenLastTriggerWeek: data.scheduled_open_last_trigger_week,
     }),
   };
 }
@@ -212,6 +260,10 @@ async function writeFlagsToDb(next) {
     scheduled_pause_day: flags.scheduledPauseDay,
     scheduled_pause_time: flags.scheduledPauseTime,
     scheduled_pause_last_trigger_week: flags.scheduledPauseLastTriggerWeek,
+    scheduled_open_enabled: Boolean(flags.scheduledOpenEnabled),
+    scheduled_open_day: flags.scheduledOpenDay,
+    scheduled_open_time: flags.scheduledOpenTime,
+    scheduled_open_last_trigger_week: flags.scheduledOpenLastTriggerWeek,
     updated_at: new Date().toISOString(),
   };
 
@@ -241,7 +293,10 @@ async function getSystemFlags() {
         base = seed;
       }
 
-      const { flags } = await applyScheduledPauseIfDueWithSaver(base, async (next) => {
+      const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(base, async (next) => {
+        await writeFlagsToDb(next);
+      });
+      const { flags } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
         await writeFlagsToDb(next);
       });
       return flags;
@@ -251,7 +306,10 @@ async function getSystemFlags() {
   }
 
   const normalized = await readFlagsFromFile();
-  const { flags } = await applyScheduledPauseIfDueWithSaver(normalized, async (next) => {
+  const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(normalized, async (next) => {
+    await writeFlagsToFile(next);
+  });
+  const { flags } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
     await writeFlagsToFile(next);
   });
   return flags;
