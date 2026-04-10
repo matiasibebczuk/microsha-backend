@@ -845,4 +845,49 @@ router.get("/history/:runId/excel", async (req, res) => {
 });
 
 
+router.post("/users", async (req, res) => {
+  try {
+    const lastname = String(req.body?.lastname || "").trim();
+    const firstname = String(req.body?.firstname || "").trim();
+    const dni = String(req.body?.dni || "").trim();
+    const memberNumber = String(req.body?.memberNumber ?? "").trim();
+
+    if (!lastname) return res.status(400).json({ error: "Apellido requerido" });
+    if (!firstname) return res.status(400).json({ error: "Nombre requerido" });
+    if (!dni) return res.status(400).json({ error: "DNI requerido" });
+
+    const validMember = memberNumber === "0" || /^\d{6}$/.test(memberNumber);
+    if (!validMember) return res.status(400).json({ error: "Número de socio debe ser 0 o un número de 6 dígitos" });
+
+    const fullName = `${lastname.toUpperCase()} ${firstname.toUpperCase()}`;
+
+    const { data: existing, error: existingError } = await supabase
+      .from("users")
+      .select("id")
+      .eq("dni", dni)
+      .maybeSingle();
+
+    if (existingError) return res.status(500).json({ error: existingError.message });
+    if (existing) return res.status(409).json({ error: "Ya existe un usuario con ese DNI" });
+
+    const { data: created, error: createError } = await supabase
+      .from("users")
+      .insert({
+        name: fullName,
+        dni,
+        role: "pasajero",
+        group_number: 1926,
+        member_number: memberNumber,
+      })
+      .select("id, name, dni, role, group_number, member_number")
+      .single();
+
+    if (createError) return res.status(500).json({ error: createError.message });
+    return res.status(201).json(created);
+  } catch (err) {
+    console.error("🔥 ADMIN CREATE USER ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
 module.exports = router;
