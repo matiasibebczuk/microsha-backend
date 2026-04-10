@@ -890,4 +890,24 @@ router.post("/users", async (req, res) => {
   }
 });
 
+router.get("/users/search", async (req, res) => {
+  try {
+    const q = String(req.query?.q || "").trim();
+    if (!q) return res.status(400).json({ error: "Parámetro de búsqueda requerido" });
+
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, name, dni, member_number, role, group_number")
+      .or(`name.ilike.%${q}%,dni.eq.${isNaN(q) ? -1 : q},member_number.eq.${isNaN(q) ? -1 : q}`)
+      .eq("role", "pasajero")
+      .limit(10);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
+  } catch (err) {
+    console.error("🔥 ADMIN SEARCH USER ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
 module.exports = router;
