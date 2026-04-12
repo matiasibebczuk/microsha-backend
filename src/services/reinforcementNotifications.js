@@ -5,8 +5,8 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
-const FORCED_ALERT_RECIPIENTS = ["matiasbeck07@gmail.com"];
-const RESEND_TEST_ALLOWED_RECIPIENT = "matiasbeck07@gmail.com";
+const FORCED_ALERT_RECIPIENTS = ["advorkin@hebraica.org.ar"];
+const RESEND_TEST_ALLOWED_RECIPIENT = "advorkin@hebraica.org.ar";
 
 function uniqueStrings(values) {
   return Array.from(new Set((values || []).filter(Boolean).map((v) => String(v).trim())));
