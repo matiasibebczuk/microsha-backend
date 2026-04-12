@@ -910,4 +910,22 @@ router.get("/users/search", async (req, res) => {
   }
 });
 
+router.delete("/trips/:tripId/reservations", async (req, res) => {
+  try {
+    const tripId = Number(req.params.tripId);
+    if (!Number.isFinite(tripId)) return res.status(400).json({ error: "tripId inválido" });
+
+    const { error } = await supabase
+      .from("reservations")
+      .delete()
+      .eq("trip_id", tripId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("🔥 CLEAR RESERVATIONS ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
 module.exports = router;
