@@ -150,11 +150,16 @@ router.post("/buses/capacity", async (req, res) => {
   try {
     const capacity = req.body?.capacity === null ? null : Number(req.body?.capacity);
 
-    // Obtener todos los buses activos del grupo via trip_buses → trips
+    // Obtener trip IDs del grupo, luego buses asociados
+    const tripIds = await getTripIdsForGroup(req.groupId);
+    if (!tripIds || tripIds.length === 0) {
+      return res.status(400).json({ error: "No hay traslados en el grupo" });
+    }
+
     const { data: tripBusRows, error: tbError } = await supabase
       .from("trip_buses")
-      .select("bus_id, buses(id, capacity), trips!inner(group_id)")
-      .eq("trips.group_id", req.groupId);
+      .select("bus_id, buses(id, capacity)")
+      .in("trip_id", tripIds);
 
     if (tbError) return res.status(500).json({ error: tbError.message });
 
