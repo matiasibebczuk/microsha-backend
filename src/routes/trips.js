@@ -644,10 +644,23 @@ router.get("/", async (req, res) => {
     }
 
     const capacityMap = new Map();
-    for (const row of capacities) {
-      const key = String(row.trip_id);
-      const current = capacityMap.get(key) || 0;
-      capacityMap.set(key, current + (row.buses?.capacity || 0));
+    const capacityOverride = systemFlags?.busCapacityOverride;
+    if (capacityOverride != null && Number.isFinite(capacityOverride) && capacityOverride > 0) {
+      // Cuenta micros por traslado y aplica override
+      const busCountMap = new Map();
+      for (const row of capacities) {
+        const key = String(row.trip_id);
+        busCountMap.set(key, (busCountMap.get(key) || 0) + 1);
+      }
+      for (const [key, count] of busCountMap) {
+        capacityMap.set(key, count * capacityOverride);
+      }
+    } else {
+      for (const row of capacities) {
+        const key = String(row.trip_id);
+        const current = capacityMap.get(key) || 0;
+        capacityMap.set(key, current + (row.buses?.capacity || 0));
+      }
     }
 
     const firstStopMap = new Map();

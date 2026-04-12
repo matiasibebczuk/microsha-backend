@@ -20,6 +20,17 @@ const supabase = createClient(
 );
 
 async function getTripCapacity(tripId) {
+  const flags = await getSystemFlags();
+  if (flags?.busCapacityOverride != null && Number.isFinite(flags.busCapacityOverride) && flags.busCapacityOverride > 0) {
+    // Contamos cuántos micros tiene el traslado y multiplicamos por el override
+    const { data, error } = await supabase
+      .from("trip_buses")
+      .select("bus_id")
+      .eq("trip_id", tripId);
+    if (error) throw error;
+    return (data?.length || 1) * flags.busCapacityOverride;
+  }
+
   const { data, error } = await supabase
     .from("trip_buses")
     .select("buses ( capacity )")

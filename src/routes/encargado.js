@@ -1086,9 +1086,9 @@ router.post("/trips/:tripId/finish", async (req, res) => {
     }
 
     try {
-      await setSystemFlags({ stopBlockActive: false });
+      await setSystemFlags({ stopBlockActive: false, busCapacityOverride: null });
     } catch (flagErr) {
-      console.warn("⚠️ STOP BLOCK RESET ERROR:", flagErr?.message || flagErr);
+      console.warn("⚠️ FLAGS RESET ERROR:", flagErr?.message || flagErr);
     }
 
     return res.json({

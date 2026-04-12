@@ -29,6 +29,7 @@ const DEFAULT_FLAGS = {
   scheduledStopBlockTime: null,
   scheduledStopBlockLastTriggerWeek: null,
   stopBlockActive: false,
+  busCapacityOverride: null,
 };
 
 function parseTimeToMinutes(value) {
@@ -133,6 +134,7 @@ function normalizeFlags(raw) {
     scheduledStopBlockTime: normalizedBlockTime,
     scheduledStopBlockLastTriggerWeek: raw?.scheduledStopBlockLastTriggerWeek ? String(raw.scheduledStopBlockLastTriggerWeek) : null,
     stopBlockActive: Boolean(raw?.stopBlockActive),
+    busCapacityOverride: raw?.busCapacityOverride != null ? Number(raw.busCapacityOverride) || null : null,
   };
 }
 
@@ -262,7 +264,7 @@ function isTableMissingError(error) {
 async function readFlagsFromDb() {
   const { data, error } = await supabase
     .from("system_settings")
-    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week, scheduled_open_enabled, scheduled_open_day, scheduled_open_time, scheduled_open_last_trigger_week, scheduled_stop_block_enabled, scheduled_stop_block_day, scheduled_stop_block_time, scheduled_stop_block_last_trigger_week, stop_block_active")
+    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week, scheduled_open_enabled, scheduled_open_day, scheduled_open_time, scheduled_open_last_trigger_week, scheduled_stop_block_enabled, scheduled_stop_block_day, scheduled_stop_block_time, scheduled_stop_block_last_trigger_week, stop_block_active, bus_capacity_override")
     .eq("id", FLAGS_ROW_ID)
     .maybeSingle();
 
@@ -295,6 +297,7 @@ async function readFlagsFromDb() {
       scheduledStopBlockTime: data.scheduled_stop_block_time,
       scheduledStopBlockLastTriggerWeek: data.scheduled_stop_block_last_trigger_week,
       stopBlockActive: data.stop_block_active,
+      busCapacityOverride: data.bus_capacity_override,
     }),
   };
 }
@@ -318,6 +321,7 @@ async function writeFlagsToDb(next) {
     scheduled_stop_block_time: flags.scheduledStopBlockTime,
     scheduled_stop_block_last_trigger_week: flags.scheduledStopBlockLastTriggerWeek,
     stop_block_active: Boolean(flags.stopBlockActive),
+    bus_capacity_override: flags.busCapacityOverride ?? null,
     updated_at: new Date().toISOString(),
   };
 

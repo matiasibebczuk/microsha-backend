@@ -115,6 +115,7 @@ router.put("/system/flags", async (req, res) => {
     const scheduledStopBlockDay = req.body?.scheduledStopBlockDay;
     const scheduledStopBlockTime = req.body?.scheduledStopBlockTime;
     const stopBlockActive = req.body?.stopBlockActive;
+    const busCapacityOverride = req.body?.busCapacityOverride;
 
     const flags = await setSystemFlags({
       ...(tripsPaused !== undefined ? { tripsPaused: Boolean(tripsPaused) } : {}),
@@ -129,6 +130,7 @@ router.put("/system/flags", async (req, res) => {
       ...(scheduledStopBlockDay !== undefined ? { scheduledStopBlockDay } : {}),
       ...(scheduledStopBlockTime !== undefined ? { scheduledStopBlockTime } : {}),
       ...(stopBlockActive !== undefined ? { stopBlockActive: Boolean(stopBlockActive) } : {}),
+      ...(busCapacityOverride !== undefined ? { busCapacityOverride: busCapacityOverride === null ? null : Number(busCapacityOverride) || null } : {}),
     });
 
     return res.json(flags);
