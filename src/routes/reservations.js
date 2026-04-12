@@ -430,13 +430,43 @@ async function promoteWaitingPassengersIfNeeded(tripId) {
 // ========================
 router.post("/", requirePassengerSession, async (req, res) => {
   try {
-    const pauseState = await getPauseState();
-    if (pauseState.paused) {
-      return res.status(503).json({ error: pauseState.message, paused: true });
+    const systemFlags = await getSystemFlags();
+    if (systemFlags?.tripsPaused) {
+      return res.status(503).json({ error: systemFlags.pauseMessage || "Traslados pausados", paused: true });
     }
 
     const { tripId, stopId } = req.body;
     const userId = req.passengerUserId;
+
+    // Bloqueo de paradas activo: verificar que la parada no esté bloqueada
+    if (systemFlags?.stopBlockActive && stopId && tripId) {
+      const { data: tripStops } = await supabase
+        .from("trip_stops")
+        .select("stop_id, order_index")
+        .eq("trip_id", Number(tripId))
+        .order("order_index");
+
+      const { data: reservations } = await supabase
+        .from("reservations")
+        .select("stop_id")
+        .eq("trip_id", Number(tripId))
+        .in("status", ["confirmed", "waiting"]);
+
+      const stopsWithPassengers = new Set(
+        (reservations || []).map(r => String(r.stop_id)).filter(Boolean)
+      );
+
+      if (stopsWithPassengers.size > 0 && Array.isArray(tripStops)) {
+        const sorted = [...tripStops].sort((a, b) => a.order_index - b.order_index);
+        const firstActiveIndex = sorted.findIndex(s => stopsWithPassengers.has(String(s.stop_id)));
+        if (firstActiveIndex > 0) {
+          const blockedStopIds = new Set(sorted.slice(0, firstActiveIndex).map(s => String(s.stop_id)));
+          if (blockedStopIds.has(String(stopId))) {
+            return res.status(400).json({ error: "Esta parada no está disponible en este momento" });
+          }
+        }
+      }
+    }
 
     const suspension = await getPassengerSuspension(userId);
     if (suspension) {

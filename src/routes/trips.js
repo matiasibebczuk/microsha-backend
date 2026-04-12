@@ -775,14 +775,44 @@ router.get("/:id/stops", async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    const result = data.map(s => ({
+    const stops = data.map(s => ({
       id: s.stop_id,
       name: s.stops.name,
       time: normalizeClockTime(s.pickup_time) || null,
-      order: s.order_index
+      order: s.order_index,
     }));
 
-    res.json(result);
+    // Bloqueo de paradas: solo aplica a pasajeros cuando stopBlockActive = true
+    const isPassenger = Boolean(req.headers["x-passenger-token"]);
+    if (isPassenger) {
+      const flags = await getSystemFlags();
+      if (flags?.stopBlockActive) {
+        const { data: reservations } = await supabase
+          .from("reservations")
+          .select("stop_id")
+          .eq("trip_id", tripId)
+          .in("status", ["confirmed", "waiting"]);
+
+        const stopsWithPassengers = new Set(
+          (reservations || []).map(r => String(r.stop_id)).filter(Boolean)
+        );
+
+        if (stopsWithPassengers.size > 0) {
+          const sorted = [...stops].sort((a, b) => a.order - b.order);
+          const firstActiveIndex = sorted.findIndex(s => stopsWithPassengers.has(String(s.id)));
+
+          if (firstActiveIndex > 0) {
+            const blockedOrders = new Set(sorted.slice(0, firstActiveIndex).map(s => s.order));
+            return res.json(stops.map(s => ({
+              ...s,
+              blocked: blockedOrders.has(s.order),
+            })));
+          }
+        }
+      }
+    }
+
+    res.json(stops);
 
   } catch (err) {
     console.error("🔥 STOPS ERROR:", err);

@@ -111,6 +111,10 @@ router.put("/system/flags", async (req, res) => {
     const scheduledOpenEnabled = req.body?.scheduledOpenEnabled;
     const scheduledOpenDay = req.body?.scheduledOpenDay;
     const scheduledOpenTime = req.body?.scheduledOpenTime;
+    const scheduledStopBlockEnabled = req.body?.scheduledStopBlockEnabled;
+    const scheduledStopBlockDay = req.body?.scheduledStopBlockDay;
+    const scheduledStopBlockTime = req.body?.scheduledStopBlockTime;
+    const stopBlockActive = req.body?.stopBlockActive;
 
     const flags = await setSystemFlags({
       ...(tripsPaused !== undefined ? { tripsPaused: Boolean(tripsPaused) } : {}),
@@ -121,6 +125,10 @@ router.put("/system/flags", async (req, res) => {
       ...(scheduledOpenEnabled !== undefined ? { scheduledOpenEnabled: Boolean(scheduledOpenEnabled) } : {}),
       ...(scheduledOpenDay !== undefined ? { scheduledOpenDay } : {}),
       ...(scheduledOpenTime !== undefined ? { scheduledOpenTime } : {}),
+      ...(scheduledStopBlockEnabled !== undefined ? { scheduledStopBlockEnabled: Boolean(scheduledStopBlockEnabled) } : {}),
+      ...(scheduledStopBlockDay !== undefined ? { scheduledStopBlockDay } : {}),
+      ...(scheduledStopBlockTime !== undefined ? { scheduledStopBlockTime } : {}),
+      ...(stopBlockActive !== undefined ? { stopBlockActive: Boolean(stopBlockActive) } : {}),
     });
 
     return res.json(flags);

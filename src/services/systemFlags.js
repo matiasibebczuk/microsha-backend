@@ -24,6 +24,11 @@ const DEFAULT_FLAGS = {
   scheduledOpenDay: null,
   scheduledOpenTime: null,
   scheduledOpenLastTriggerWeek: null,
+  scheduledStopBlockEnabled: false,
+  scheduledStopBlockDay: null,
+  scheduledStopBlockTime: null,
+  scheduledStopBlockLastTriggerWeek: null,
+  stopBlockActive: false,
 };
 
 function parseTimeToMinutes(value) {
@@ -107,6 +112,11 @@ function normalizeFlags(raw) {
   const validOpenDay = Number.isInteger(normalizedOpenDay) && normalizedOpenDay >= 0 && normalizedOpenDay <= 6 ? normalizedOpenDay : null;
   const normalizedOpenTime = normalizeClockTime(raw?.scheduledOpenTime);
 
+  const blockDay = raw?.scheduledStopBlockDay;
+  const normalizedBlockDay = blockDay === null || blockDay === undefined || blockDay === "" ? null : Number(blockDay);
+  const validBlockDay = Number.isInteger(normalizedBlockDay) && normalizedBlockDay >= 0 && normalizedBlockDay <= 6 ? normalizedBlockDay : null;
+  const normalizedBlockTime = normalizeClockTime(raw?.scheduledStopBlockTime);
+
   return {
     tripsPaused: Boolean(raw?.tripsPaused),
     pauseMessage: String(raw?.pauseMessage || DEFAULT_FLAGS.pauseMessage),
@@ -118,6 +128,11 @@ function normalizeFlags(raw) {
     scheduledOpenDay: validOpenDay,
     scheduledOpenTime: normalizedOpenTime,
     scheduledOpenLastTriggerWeek: raw?.scheduledOpenLastTriggerWeek ? String(raw.scheduledOpenLastTriggerWeek) : null,
+    scheduledStopBlockEnabled: Boolean(raw?.scheduledStopBlockEnabled) && validBlockDay !== null && Boolean(normalizedBlockTime),
+    scheduledStopBlockDay: validBlockDay,
+    scheduledStopBlockTime: normalizedBlockTime,
+    scheduledStopBlockLastTriggerWeek: raw?.scheduledStopBlockLastTriggerWeek ? String(raw.scheduledStopBlockLastTriggerWeek) : null,
+    stopBlockActive: Boolean(raw?.stopBlockActive),
   };
 }
 
@@ -187,6 +202,35 @@ async function applyScheduledOpenIfDueWithSaver(flags, saveFn) {
   return { flags: next, changed: true };
 }
 
+async function applyScheduledStopBlockIfDueWithSaver(flags, saveFn) {
+  if (!flags?.scheduledStopBlockEnabled) return { flags, changed: false };
+  if (flags.scheduledStopBlockDay === null || !flags.scheduledStopBlockTime) return { flags, changed: false };
+
+  const now = getArgentinaNowParts();
+  if (now.weekday === null) return { flags, changed: false };
+
+  const targetMinutes = parseTimeToMinutes(flags.scheduledStopBlockTime);
+  if (targetMinutes === null) return { flags, changed: false };
+
+  const currentWeekKey = getCurrentArgentinaWeekKey();
+  if (!currentWeekKey) return { flags, changed: false };
+
+  const targetWeekMinutes = flags.scheduledStopBlockDay * 1440 + targetMinutes;
+  const dueThisWeek = now.weekMinutes >= targetWeekMinutes;
+  const alreadyTriggeredThisWeek = flags.scheduledStopBlockLastTriggerWeek === currentWeekKey;
+
+  if (!dueThisWeek || alreadyTriggeredThisWeek) return { flags, changed: false };
+
+  const next = {
+    ...flags,
+    stopBlockActive: true,
+    scheduledStopBlockLastTriggerWeek: currentWeekKey,
+  };
+
+  await saveFn(next);
+  return { flags: next, changed: true };
+}
+
 async function readFlagsFromFile() {
   await fs.promises.mkdir(dataDir, { recursive: true });
 
@@ -218,7 +262,7 @@ function isTableMissingError(error) {
 async function readFlagsFromDb() {
   const { data, error } = await supabase
     .from("system_settings")
-    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week, scheduled_open_enabled, scheduled_open_day, scheduled_open_time, scheduled_open_last_trigger_week")
+    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week, scheduled_open_enabled, scheduled_open_day, scheduled_open_time, scheduled_open_last_trigger_week, scheduled_stop_block_enabled, scheduled_stop_block_day, scheduled_stop_block_time, scheduled_stop_block_last_trigger_week, stop_block_active")
     .eq("id", FLAGS_ROW_ID)
     .maybeSingle();
 
@@ -246,6 +290,11 @@ async function readFlagsFromDb() {
       scheduledOpenDay: data.scheduled_open_day,
       scheduledOpenTime: data.scheduled_open_time,
       scheduledOpenLastTriggerWeek: data.scheduled_open_last_trigger_week,
+      scheduledStopBlockEnabled: data.scheduled_stop_block_enabled,
+      scheduledStopBlockDay: data.scheduled_stop_block_day,
+      scheduledStopBlockTime: data.scheduled_stop_block_time,
+      scheduledStopBlockLastTriggerWeek: data.scheduled_stop_block_last_trigger_week,
+      stopBlockActive: data.stop_block_active,
     }),
   };
 }
@@ -264,6 +313,11 @@ async function writeFlagsToDb(next) {
     scheduled_open_day: flags.scheduledOpenDay,
     scheduled_open_time: flags.scheduledOpenTime,
     scheduled_open_last_trigger_week: flags.scheduledOpenLastTriggerWeek,
+    scheduled_stop_block_enabled: Boolean(flags.scheduledStopBlockEnabled),
+    scheduled_stop_block_day: flags.scheduledStopBlockDay,
+    scheduled_stop_block_time: flags.scheduledStopBlockTime,
+    scheduled_stop_block_last_trigger_week: flags.scheduledStopBlockLastTriggerWeek,
+    stop_block_active: Boolean(flags.stopBlockActive),
     updated_at: new Date().toISOString(),
   };
 
@@ -296,7 +350,10 @@ async function getSystemFlags() {
       const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(base, async (next) => {
         await writeFlagsToDb(next);
       });
-      const { flags } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
+      const { flags: afterOpen } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
+        await writeFlagsToDb(next);
+      });
+      const { flags } = await applyScheduledStopBlockIfDueWithSaver(afterOpen, async (next) => {
         await writeFlagsToDb(next);
       });
       return flags;
@@ -309,7 +366,10 @@ async function getSystemFlags() {
   const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(normalized, async (next) => {
     await writeFlagsToFile(next);
   });
-  const { flags } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
+  const { flags: afterOpen } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
+    await writeFlagsToFile(next);
+  });
+  const { flags } = await applyScheduledStopBlockIfDueWithSaver(afterOpen, async (next) => {
     await writeFlagsToFile(next);
   });
   return flags;
