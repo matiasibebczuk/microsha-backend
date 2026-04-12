@@ -1086,7 +1086,17 @@ router.post("/trips/:tripId/finish", async (req, res) => {
     }
 
     try {
-      await setSystemFlags({ stopBlockActive: false, busCapacityOverride: null });
+      const { getSystemFlags } = require("../services/systemFlags");
+      const currentFlags = await getSystemFlags();
+      const originals = currentFlags?.busOriginalCapacities;
+      if (originals && typeof originals === "object") {
+        await Promise.all(
+          Object.entries(originals).map(([busId, cap]) =>
+            supabase.from("buses").update({ capacity: Number(cap) }).eq("id", Number(busId))
+          )
+        );
+      }
+      await setSystemFlags({ stopBlockActive: false, busCapacityOverride: null, busOriginalCapacities: null });
     } catch (flagErr) {
       console.warn("⚠️ FLAGS RESET ERROR:", flagErr?.message || flagErr);
     }

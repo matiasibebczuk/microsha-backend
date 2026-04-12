@@ -30,6 +30,7 @@ const DEFAULT_FLAGS = {
   scheduledStopBlockLastTriggerWeek: null,
   stopBlockActive: false,
   busCapacityOverride: null,
+  busOriginalCapacities: null,
 };
 
 function parseTimeToMinutes(value) {
@@ -135,6 +136,7 @@ function normalizeFlags(raw) {
     scheduledStopBlockLastTriggerWeek: raw?.scheduledStopBlockLastTriggerWeek ? String(raw.scheduledStopBlockLastTriggerWeek) : null,
     stopBlockActive: Boolean(raw?.stopBlockActive),
     busCapacityOverride: raw?.busCapacityOverride != null ? Number(raw.busCapacityOverride) || null : null,
+    busOriginalCapacities: raw?.busOriginalCapacities && typeof raw.busOriginalCapacities === "object" ? raw.busOriginalCapacities : null,
   };
 }
 
@@ -264,7 +266,7 @@ function isTableMissingError(error) {
 async function readFlagsFromDb() {
   const { data, error } = await supabase
     .from("system_settings")
-    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week, scheduled_open_enabled, scheduled_open_day, scheduled_open_time, scheduled_open_last_trigger_week, scheduled_stop_block_enabled, scheduled_stop_block_day, scheduled_stop_block_time, scheduled_stop_block_last_trigger_week, stop_block_active, bus_capacity_override")
+    .select("id, trips_paused, pause_message, scheduled_pause_enabled, scheduled_pause_day, scheduled_pause_time, scheduled_pause_last_trigger_week, scheduled_open_enabled, scheduled_open_day, scheduled_open_time, scheduled_open_last_trigger_week, scheduled_stop_block_enabled, scheduled_stop_block_day, scheduled_stop_block_time, scheduled_stop_block_last_trigger_week, stop_block_active, bus_capacity_override, bus_original_capacities")
     .eq("id", FLAGS_ROW_ID)
     .maybeSingle();
 
@@ -298,6 +300,7 @@ async function readFlagsFromDb() {
       scheduledStopBlockLastTriggerWeek: data.scheduled_stop_block_last_trigger_week,
       stopBlockActive: data.stop_block_active,
       busCapacityOverride: data.bus_capacity_override,
+      busOriginalCapacities: data.bus_original_capacities,
     }),
   };
 }
@@ -322,6 +325,7 @@ async function writeFlagsToDb(next) {
     scheduled_stop_block_last_trigger_week: flags.scheduledStopBlockLastTriggerWeek,
     stop_block_active: Boolean(flags.stopBlockActive),
     bus_capacity_override: flags.busCapacityOverride ?? null,
+    bus_original_capacities: flags.busOriginalCapacities ?? null,
     updated_at: new Date().toISOString(),
   };
 

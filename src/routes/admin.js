@@ -120,15 +120,19 @@ router.put("/system/flags", async (req, res) => {
     const flags = await setSystemFlags({
       ...(tripsPaused !== undefined ? { tripsPaused: Boolean(tripsPaused) } : {}),
       ...(pauseMessage !== undefined ? { pauseMessage: String(pauseMessage || "").trim() || "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera" } : {}),
+      // Al activar/modificar schedule, reset lastTriggerWeek para que aplique esta semana
       ...(scheduledPauseEnabled !== undefined ? { scheduledPauseEnabled: Boolean(scheduledPauseEnabled) } : {}),
       ...(scheduledPauseDay !== undefined ? { scheduledPauseDay } : {}),
       ...(scheduledPauseTime !== undefined ? { scheduledPauseTime } : {}),
+      ...((scheduledPauseEnabled === true || scheduledPauseDay !== undefined || scheduledPauseTime !== undefined) ? { scheduledPauseLastTriggerWeek: null } : {}),
       ...(scheduledOpenEnabled !== undefined ? { scheduledOpenEnabled: Boolean(scheduledOpenEnabled) } : {}),
       ...(scheduledOpenDay !== undefined ? { scheduledOpenDay } : {}),
       ...(scheduledOpenTime !== undefined ? { scheduledOpenTime } : {}),
+      ...((scheduledOpenEnabled === true || scheduledOpenDay !== undefined || scheduledOpenTime !== undefined) ? { scheduledOpenLastTriggerWeek: null } : {}),
       ...(scheduledStopBlockEnabled !== undefined ? { scheduledStopBlockEnabled: Boolean(scheduledStopBlockEnabled) } : {}),
       ...(scheduledStopBlockDay !== undefined ? { scheduledStopBlockDay } : {}),
       ...(scheduledStopBlockTime !== undefined ? { scheduledStopBlockTime } : {}),
+      ...((scheduledStopBlockEnabled === true || scheduledStopBlockDay !== undefined || scheduledStopBlockTime !== undefined) ? { scheduledStopBlockLastTriggerWeek: null } : {}),
       ...(stopBlockActive !== undefined ? { stopBlockActive: Boolean(stopBlockActive) } : {}),
       ...(busCapacityOverride !== undefined ? { busCapacityOverride: busCapacityOverride === null ? null : Number(busCapacityOverride) || null } : {}),
     });
@@ -136,6 +140,69 @@ router.put("/system/flags", async (req, res) => {
     return res.json(flags);
   } catch (err) {
     console.error("🔥 ADMIN FLAGS PUT ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+// POST /admin/buses/capacity — actualiza capacidad de todos los micros del grupo
+router.post("/buses/capacity", async (req, res) => {
+  try {
+    const capacity = req.body?.capacity === null ? null : Number(req.body?.capacity);
+
+    // Obtener todos los buses activos del grupo via trip_buses → trips
+    const { data: tripBusRows, error: tbError } = await supabase
+      .from("trip_buses")
+      .select("bus_id, buses(id, capacity), trips!inner(group_id)")
+      .eq("trips.group_id", req.groupId);
+
+    if (tbError) return res.status(500).json({ error: tbError.message });
+
+    // Buses únicos
+    const busMap = new Map();
+    for (const row of (tripBusRows || [])) {
+      const id = row.bus_id;
+      if (id && !busMap.has(id)) {
+        busMap.set(id, row.buses?.capacity ?? null);
+      }
+    }
+
+    if (busMap.size === 0) return res.status(400).json({ error: "No hay micros registrados en los traslados" });
+
+    if (capacity === null) {
+      // Restablecer: leer originales desde flags
+      const currentFlags = await (require("../services/systemFlags").getSystemFlags)();
+      const originals = currentFlags?.busOriginalCapacities || {};
+      const updates = [...busMap.keys()].map(async (busId) => {
+        const orig = originals[String(busId)];
+        if (orig == null) return;
+        return supabase.from("buses").update({ capacity: orig }).eq("id", busId);
+      });
+      await Promise.all(updates);
+      await (require("../services/systemFlags").setSystemFlags)({ busCapacityOverride: null, busOriginalCapacities: null });
+      return res.json({ ok: true, capacity: null });
+    }
+
+    if (!Number.isFinite(capacity) || capacity <= 0) {
+      return res.status(400).json({ error: "Capacidad inválida" });
+    }
+
+    // Guardar originales y actualizar
+    const originals = {};
+    busMap.forEach((cap, id) => { originals[String(id)] = cap; });
+
+    const updates = [...busMap.keys()].map((busId) =>
+      supabase.from("buses").update({ capacity }).eq("id", busId)
+    );
+    await Promise.all(updates);
+
+    await (require("../services/systemFlags").setSystemFlags)({
+      busCapacityOverride: capacity,
+      busOriginalCapacities: originals,
+    });
+
+    return res.json({ ok: true, capacity, busCount: busMap.size });
+  } catch (err) {
+    console.error("🔥 BUSES CAPACITY ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
   }
 });
