@@ -9,6 +9,7 @@ const { getNextScheduleActivationIso, normalizeClockTime } = require("../utils/s
 const { isSanctionsEnabled } = require("../config/featureFlags");
 const { getLastFriday20Iso } = require("../utils/fridayWindow");
 const { notifyAdminsTripFinishedSummary } = require("../services/reinforcementNotifications");
+const { setSystemFlags } = require("../services/systemFlags");
 
 const router = express.Router();
 
@@ -1081,8 +1082,13 @@ router.post("/trips/:tripId/finish", async (req, res) => {
         stopped_at: finishedAt,
       });
     } catch (locationStopError) {
-      // Do not block trip finalization if location tracking is not available.
       console.warn("⚠️ LOCATION AUTO-STOP AFTER FINISH ERROR:", locationStopError?.message || locationStopError);
+    }
+
+    try {
+      await setSystemFlags({ stopBlockActive: false });
+    } catch (flagErr) {
+      console.warn("⚠️ STOP BLOCK RESET ERROR:", flagErr?.message || flagErr);
     }
 
     return res.json({
