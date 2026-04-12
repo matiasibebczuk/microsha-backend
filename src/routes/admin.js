@@ -132,7 +132,8 @@ router.put("/system/flags", async (req, res) => {
       ...(scheduledStopBlockEnabled !== undefined ? { scheduledStopBlockEnabled: Boolean(scheduledStopBlockEnabled) } : {}),
       ...(scheduledStopBlockDay !== undefined ? { scheduledStopBlockDay } : {}),
       ...(scheduledStopBlockTime !== undefined ? { scheduledStopBlockTime } : {}),
-      ...((scheduledStopBlockEnabled === true || scheduledStopBlockDay !== undefined || scheduledStopBlockTime !== undefined) ? { scheduledStopBlockLastTriggerWeek: null } : {}),
+      // Al activar/modificar stop block, reset lastTriggerWeek y desactivar bloqueo activo para que re-aplique esta semana
+      ...((scheduledStopBlockEnabled === true || scheduledStopBlockDay !== undefined || scheduledStopBlockTime !== undefined) ? { scheduledStopBlockLastTriggerWeek: null, stopBlockActive: false } : {}),
       ...(stopBlockActive !== undefined ? { stopBlockActive: Boolean(stopBlockActive) } : {}),
       ...(busCapacityOverride !== undefined ? { busCapacityOverride: busCapacityOverride === null ? null : Number(busCapacityOverride) || null } : {}),
     });
