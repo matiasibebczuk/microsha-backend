@@ -76,6 +76,8 @@ async function sendViaGmail({ to, subject, html }) {
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: { user, pass },
+    secure: false,
+    port: 587,
   });
 
   const toList = uniqueStrings(Array.isArray(to) ? to : []);
