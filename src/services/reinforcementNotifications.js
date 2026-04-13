@@ -1,5 +1,4 @@
 const { createClient } = require("@supabase/supabase-js");
-const nodemailer = require("nodemailer");
 const { getStaffMembershipsByGroup } = require("../middleware/groupStore");
 
 const supabase = createClient(
@@ -72,22 +71,32 @@ async function resolveAdminEmails(groupId) {
   return uniqueStrings([...emails, ...fallbackEmails, ...FORCED_ALERT_RECIPIENTS]);
 }
 
-async function sendViaGmail({ to, subject, html }) {
-  const user = process.env.GMAIL_USER;
-  const pass = process.env.GMAIL_APP_PASSWORD;
-  if (!user || !pass) return { sent: false, reason: "missing_gmail_env" };
-
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user, pass },
-    secure: false,
-    port: 587,
-  });
+async function sendViaBrevo({ to, subject, html }) {
+  const apiKey = process.env.BREVO_API_KEY;
+  if (!apiKey) return { sent: false, reason: "missing_brevo_api_key" };
 
   const toList = uniqueStrings(Array.isArray(to) ? to : []);
   if (toList.length === 0) return { sent: false, reason: "no_recipients" };
 
-  await transporter.sendMail({ from: user, to: toList.join(", "), subject, html });
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: {
+      "api-key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      sender: { email: "matiasbeck07@gmail.com", name: "MicroSHA Alerts" },
+      to: toList.map((email) => ({ email })),
+      subject,
+      htmlContent: html,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Brevo error ${response.status}: ${body}`);
+  }
+
   return { sent: true, to: toList };
 }
 
@@ -96,8 +105,8 @@ async function sendViaResend({ to, subject, html }) {
   const from = process.env.ADMIN_ALERTS_FROM_EMAIL;
 
   if (!apiKey || !from) {
-    console.warn("[alerts] Resend not configured, trying Gmail");
-    return sendViaGmail({ to, subject, html });
+    console.warn("[alerts] Resend not configured, trying Brevo");
+    return sendViaBrevo({ to, subject, html });
   }
 
   const sender = String(from || "").trim().toLowerCase();
@@ -106,8 +115,8 @@ async function sendViaResend({ to, subject, html }) {
   const effectiveTo = isTestingSender ? [] : toList;
 
   if (effectiveTo.length === 0) {
-    console.warn("[alerts] Resend in testing mode or no recipients, falling back to Gmail");
-    return sendViaGmail({ to, subject, html });
+    console.warn("[alerts] Resend in testing mode or no recipients, falling back to Brevo");
+    return sendViaBrevo({ to, subject, html });
   }
 
   const response = await fetch("https://api.resend.com/emails", {
