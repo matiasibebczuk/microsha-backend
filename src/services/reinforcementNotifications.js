@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const nodemailer = require("nodemailer");
 const { getStaffMembershipsByGroup } = require("../middleware/groupStore");
 
 const supabase = createClient(
@@ -6,7 +7,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 const FORCED_ALERT_RECIPIENTS = ["advorkin@hebraica.org.ar"];
-const RESEND_TEST_ALLOWED_RECIPIENT = "advorkin@hebraica.org.ar";
 
 function uniqueStrings(values) {
   return Array.from(new Set((values || []).filter(Boolean).map((v) => String(v).trim())));
@@ -68,31 +68,40 @@ async function resolveAdminEmails(groupId) {
   return uniqueStrings([...emails, ...fallbackEmails, ...FORCED_ALERT_RECIPIENTS]);
 }
 
+async function sendViaGmail({ to, subject, html }) {
+  const user = process.env.GMAIL_USER;
+  const pass = process.env.GMAIL_APP_PASSWORD;
+  if (!user || !pass) return { sent: false, reason: "missing_gmail_env" };
+
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: { user, pass },
+  });
+
+  const toList = uniqueStrings(Array.isArray(to) ? to : []);
+  if (toList.length === 0) return { sent: false, reason: "no_recipients" };
+
+  await transporter.sendMail({ from: user, to: toList.join(", "), subject, html });
+  return { sent: true, to: toList };
+}
+
 async function sendViaResend({ to, subject, html }) {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.ADMIN_ALERTS_FROM_EMAIL;
 
   if (!apiKey || !from) {
-    console.warn("[alerts] Resend not configured", {
-      hasApiKey: Boolean(apiKey),
-      hasFrom: Boolean(from),
-    });
-    return { sent: false, reason: "missing_env" };
+    console.warn("[alerts] Resend not configured, trying Gmail");
+    return sendViaGmail({ to, subject, html });
   }
 
   const sender = String(from || "").trim().toLowerCase();
   const isTestingSender = sender.endsWith("@resend.dev");
   const toList = uniqueStrings(Array.isArray(to) ? to : []);
-  const effectiveTo = isTestingSender
-    ? toList.filter((email) => String(email || "").trim().toLowerCase() === RESEND_TEST_ALLOWED_RECIPIENT)
-    : toList;
+  const effectiveTo = isTestingSender ? [] : toList;
 
   if (effectiveTo.length === 0) {
-    console.warn("[alerts] No valid recipients after applying resend.dev testing restrictions", {
-      from,
-      requestedRecipients: toList,
-    });
-    return { sent: false, reason: "no_allowed_testing_recipient" };
+    console.warn("[alerts] Resend in testing mode or no recipients, falling back to Gmail");
+    return sendViaGmail({ to, subject, html });
   }
 
   const response = await fetch("https://api.resend.com/emails", {
@@ -101,12 +110,7 @@ async function sendViaResend({ to, subject, html }) {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      from,
-      to: effectiveTo,
-      subject,
-      html,
-    }),
+    body: JSON.stringify({ from, to: effectiveTo, subject, html }),
   });
 
   if (!response.ok) {
