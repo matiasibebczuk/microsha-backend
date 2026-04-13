@@ -61,8 +61,12 @@ async function resolveAdminEmails(groupId) {
         adminId,
         message: error?.message || "unknown",
       });
-      // Ignore per-user lookup failures; we still notify remaining admins.
     }
+  }
+
+  // Si no se resolvieron emails de admins, usa fallback + forced
+  if (emails.length === 0) {
+    return uniqueStrings([...fallbackEmails, ...FORCED_ALERT_RECIPIENTS]);
   }
 
   return uniqueStrings([...emails, ...fallbackEmails, ...FORCED_ALERT_RECIPIENTS]);
