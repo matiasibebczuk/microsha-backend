@@ -449,8 +449,11 @@ router.post("/", requirePassengerSession, async (req, res) => {
     const { tripId, stopId } = req.body;
     const userId = req.passengerUserId;
 
-    // Bloqueo de paradas activo: verificar que la parada no esté bloqueada
-    if (systemFlags?.stopBlockActive && stopId && tripId) {
+    // Bloqueo de paradas activo: solo en traslados de tipo "ida"
+    const { data: tripTypeRow } = await supabase.from("trips").select("type").eq("id", Number(tripId)).maybeSingle();
+    const isIdaTrip = tripTypeRow?.type === "ida";
+
+    if (systemFlags?.stopBlockActive && isIdaTrip && stopId && tripId) {
       const { data: tripStops } = await supabase
         .from("trip_stops")
         .select("stop_id, order_index")

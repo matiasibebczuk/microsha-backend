@@ -772,32 +772,33 @@ router.get("/:id/stops", async (req, res) => {
       return res.status(403).json({ error: "No tenés permisos para ver este viaje" });
     }
 
-    const { data, error } = await supabase
-      .from("trip_stops")
-      .select(`
-        stop_id,
-        pickup_time,
-        order_index,
-        stops (
-          id,
-          name
-        )
-      `)
-      .eq("trip_id", tripId)
-      .order("order_index");
+    const [stopsResult, tripResult] = await Promise.all([
+      supabase
+        .from("trip_stops")
+        .select(`stop_id, pickup_time, order_index, stops ( id, name )`)
+        .eq("trip_id", tripId)
+        .order("order_index"),
+      supabase
+        .from("trips")
+        .select("type")
+        .eq("id", tripId)
+        .maybeSingle(),
+    ]);
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (stopsResult.error) return res.status(500).json({ error: stopsResult.error.message });
 
-    const stops = data.map(s => ({
+    const stops = stopsResult.data.map(s => ({
       id: s.stop_id,
       name: s.stops.name,
       time: normalizeClockTime(s.pickup_time) || null,
       order: s.order_index,
     }));
 
-    // Bloqueo de paradas: solo aplica a pasajeros cuando stopBlockActive = true
+    const tripType = tripResult.data?.type || null;
+
+    // Bloqueo de paradas: solo aplica a pasajeros en traslados de tipo "ida" cuando stopBlockActive = true
     const isPassenger = Boolean(req.headers["x-passenger-token"]);
-    if (isPassenger) {
+    if (isPassenger && tripType === "ida") {
       const flags = await getSystemFlags();
       if (flags?.stopBlockActive) {
         const { data: reservations } = await supabase
