@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
+const rateLimit = require("express-rate-limit");
 
 const authRoutes = require("./routes/auth");
 const tripRoutes = require("./routes/trips");
@@ -49,6 +50,16 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.set("etag", "weak");
 app.use(compression({ threshold: 1024 }));
+
+// Rate limiting global: 200 requests por 15 minutos por IP
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Demasiadas solicitudes, esperá unos minutos" },
+  skip: (req) => req.path === "/ping",
+}));
 
 
 app.get("/ping", (req, res) => {
