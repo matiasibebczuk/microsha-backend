@@ -590,7 +590,7 @@ router.get("/", async (req, res) => {
     ] = await Promise.all([
       supabase
         .from("trips")
-        .select("id, name, type, departure_datetime, status, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
+        .select("id, name, type, departure_datetime, start_time, status, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
         .in("id", mergedTripIds)
         .in("status", ["open", "closed"])
         .order("departure_datetime"),
