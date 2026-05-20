@@ -10,15 +10,26 @@ module.exports = async function auth(req, res, next) {
 
     const token = header.replace("Bearer ", "");
 
-    // 🔥 verificar JWT localmente
+    // 🔥 decodificar JWT localmente
     const decoded = jwt.decode(token);
 
     if (!decoded) {
       return res.status(401).json({ error: "Invalid token" });
     }
 
-    // guardar usuario en request
-    req.user = decoded;
+    // 🔥 compatibilidad con Supabase + roles
+    req.user = {
+      id: decoded.sub,
+      email: decoded.email,
+
+      app_metadata: decoded.app_metadata || {},
+      user_metadata: decoded.user_metadata || {},
+
+      raw_app_meta_data: decoded.app_metadata || {},
+      raw_user_meta_data: decoded.user_metadata || {},
+
+      ...decoded,
+    };
 
     next();
   } catch (err) {
