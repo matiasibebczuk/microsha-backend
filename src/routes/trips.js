@@ -397,6 +397,9 @@ function parseClockToMinutes(value) {
 }
 
 function resolveTripSortMinutes(trip) {
+  const fromStartTime = parseClockToMinutes(trip?.start_time);
+  if (fromStartTime !== null) return fromStartTime;
+
   const fromFirstTime = parseClockToMinutes(trip?.first_time);
   if (fromFirstTime !== null) return fromFirstTime;
 
@@ -540,6 +543,7 @@ router.get("/", async (req, res) => {
             confirmed: row.confirmed || 0,
             waiting: row.waiting || 0,
             capacity: row.capacity || 0,
+            start_time: row.start_time ? normalizeClockTime(row.start_time) : (normalizeClockTime(row.first_time) || null),
             first_time: normalizeClockTime(row.first_time) || null,
             active_started_at: row.active_started_at || null,
             last_finished_at: row.last_finished_at || null,
@@ -717,6 +721,7 @@ router.get("/", async (req, res) => {
         confirmed: counts.confirmed,
         waiting: counts.waiting,
         capacity,
+        start_time: trip.start_time ? normalizeClockTime(trip.start_time) : (firstStopMap.get(key) || null),
         first_time: firstStopMap.get(key) || null,
         active_started_at: activeRunMap.get(key) || null,
         last_finished_at: finishedRunMap.get(key) || null,
@@ -901,6 +906,7 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
       name,
       type,
       departure_datetime,
+      start_time,
       waitlist_start_at,
       waitlist_end_at,
       waitlist_start_day,
@@ -915,6 +921,10 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
       status: "open",
       departure_datetime: departure_datetime || new Date().toISOString(),
     };
+
+    if (start_time !== undefined) {
+      payload.start_time = start_time ? normalizeClockTime(start_time) : null;
+    }
 
     if (waitlist_start_at !== undefined) {
       payload.waitlist_start_at = waitlist_start_at || null;
