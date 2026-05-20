@@ -1,4 +1,4 @@
-const { supabase } = require("../lib/supabaseClient");
+const jwt = require("jsonwebtoken");
 
 module.exports = async function auth(req, res, next) {
   try {
@@ -10,18 +10,22 @@ module.exports = async function auth(req, res, next) {
 
     const token = header.replace("Bearer ", "");
 
-    // 🔥 validar token contra supabase
-    const { data, error } = await supabase.auth.getUser(token);
+    // 🔥 verificar JWT localmente
+    const decoded = jwt.decode(token);
 
-    if (error || !data.user) {
+    if (!decoded) {
       return res.status(401).json({ error: "Invalid token" });
     }
 
-    req.user = data.user;
+    // guardar usuario en request
+    req.user = decoded;
 
     next();
   } catch (err) {
     console.error("AUTH ERROR:", err);
-    res.status(401).json({ error: "Auth failed" });
+
+    return res.status(401).json({
+      error: "Auth failed",
+    });
   }
 };
