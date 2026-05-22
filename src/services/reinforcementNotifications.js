@@ -247,4 +247,6 @@ module.exports = {
   notifyAdminsReinforcementActivated,
   notifyAdminsTripFinishedSummary,
   sendAdminTestEmail,
+  sendViaResend,
+  resolveAdminEmails,
 };
