@@ -1028,9 +1028,19 @@ router.post("/test-mail-resumen", async (req, res) => {
       });
     }
 
-    const testEmail = "matiasbeck07@gmail.com";
+    const to = await resolveAdminEmails(req.groupId);
+
+    if (to.length === 0) {
+      return res.status(503).json({
+        success: false,
+        reason: "no_recipients",
+        to: [],
+        tripCount: mailData.tripCount,
+      });
+    }
+
     const result = await sendViaResend({
-      to: [testEmail],
+      to,
       subject: mailData.subject,
       html: mailData.html,
     });
@@ -1039,14 +1049,14 @@ router.post("/test-mail-resumen", async (req, res) => {
       return res.status(503).json({
         success: false,
         reason: result?.reason || "send_failed",
-        to: [testEmail],
+        to,
         tripCount: mailData.tripCount,
       });
     }
 
     return res.json({
       success: true,
-      to: [testEmail],
+      to,
       tripCount: mailData.tripCount,
       tripCountIda: mailData.tripCountIda,
       tripCountVuelta: mailData.tripCountVuelta,
