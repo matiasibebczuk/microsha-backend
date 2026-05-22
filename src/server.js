@@ -12,6 +12,7 @@ const adminRoutes = require("./routes/admin");
 const meRoutes = require("./routes/me");
 const templatesRoutes = require("./routes/templates");
 const groupsRoutes = require("./routes/groups");
+const { initAllSchedulers } = require("./cron");
 
 
 
@@ -75,6 +76,7 @@ app.use("/me", meRoutes);
 app.use("/templates", templatesRoutes);
 app.use("/groups", groupsRoutes);
 
+initAllSchedulers();
 
 app.listen(port, () => {
   console.log(`🚀 MicroSHA backend running on port ${port}`);

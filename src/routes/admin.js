@@ -7,6 +7,8 @@ const { getTripIdsForGroup } = require("../middleware/groupStore");
 const { getSystemFlags, setSystemFlags } = require("../services/systemFlags");
 const { isSanctionsEnabled } = require("../config/featureFlags");
 const { sendAdminTestEmail } = require("../services/reinforcementNotifications");
+const { generarMailResumenTraslados } = require("../services/resumenTraslados");
+const { resolveAdminEmails, sendViaResend } = require("../services/reinforcementNotifications");
 
 const router = express.Router();
 
@@ -1008,6 +1010,53 @@ router.delete("/trips/:tripId/reservations", async (req, res) => {
   } catch (err) {
     console.error("🔥 CLEAR RESERVATIONS ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+router.post("/test-mail-resumen", async (req, res) => {
+  try {
+    const mailData = await generarMailResumenTraslados({
+      groupId: req.groupId,
+    });
+
+    if (!mailData.hasContent) {
+      return res.status(503).json({
+        success: false,
+        reason: "no_open_trips",
+        to: [],
+        tripCount: 0,
+      });
+    }
+
+    const testEmail = "matiasbeck07@gmail.com";
+    const result = await sendViaResend({
+      to: [testEmail],
+      subject: mailData.subject,
+      html: mailData.html,
+    });
+
+    if (!result?.sent) {
+      return res.status(503).json({
+        success: false,
+        reason: result?.reason || "send_failed",
+        to: [testEmail],
+        tripCount: mailData.tripCount,
+      });
+    }
+
+    return res.json({
+      success: true,
+      to: [testEmail],
+      tripCount: mailData.tripCount,
+      tripCountIda: mailData.tripCountIda,
+      tripCountVuelta: mailData.tripCountVuelta,
+    });
+  } catch (err) {
+    console.error("🔥 ADMIN TEST MAIL RESUMEN ERROR:", err);
+    return res.status(500).json({
+      error: err?.message || "Server exploded",
+      reason: "test_mail_resumen_failed",
+    });
   }
 });
 
