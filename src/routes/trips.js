@@ -721,7 +721,7 @@ router.get("/", async (req, res) => {
         confirmed: counts.confirmed,
         waiting: counts.waiting,
         capacity,
-        start_time: trip.start_time ? normalizeClockTime(trip.start_time) : (firstStopMap.get(key) || null),
+        start_time: trip.start_time ? normalizeClockTime(trip.start_time) : null,
         first_time: firstStopMap.get(key) || null,
         active_started_at: activeRunMap.get(key) || null,
         last_finished_at: finishedRunMap.get(key) || null,
