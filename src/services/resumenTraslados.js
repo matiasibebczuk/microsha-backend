@@ -59,12 +59,25 @@ async function getStopsWithPassengers(tripId) {
 }
 
 async function getTripsSummary(groupId) {
+  const { data: tripGroups, error: tgError } = await supabase
+    .from("trip_groups")
+    .select("trip_id")
+    .eq("group_id", groupId);
+
+  if (tgError) throw tgError;
+
+  const tripIds = (tripGroups || [])
+    .map((row) => row.trip_id)
+    .filter(Boolean);
+
+  if (tripIds.length === 0) {
+    return [];
+  }
+
   const { data: trips, error: tripsError } = await supabase
     .from("trips")
-    .select(
-      "id, name, type, status, departure_datetime, start_time, confirmed:reservations(count), waiting:reservations(count)"
-    )
-    .eq("group_id", groupId)
+    .select("id, name, type, status, departure_datetime, start_time")
+    .in("id", tripIds)
     .eq("status", "open");
 
   if (tripsError) throw tripsError;
@@ -73,17 +86,20 @@ async function getTripsSummary(groupId) {
 
   const enriched = await Promise.all(
     tripsArray.map(async (trip) => {
-      const { data: confirmados } = await supabase
+      const { count: confirmadosCount, error: confirmError } = await supabase
         .from("reservations")
-        .select("id", { count: "exact" })
+        .select("id", { count: "exact", head: true })
         .eq("trip_id", trip.id)
         .eq("status", "confirmed");
 
-      const { data: esperando } = await supabase
+      const { count: esperandoCount, error: esperandoError } = await supabase
         .from("reservations")
-        .select("id", { count: "exact" })
+        .select("id", { count: "exact", head: true })
         .eq("trip_id", trip.id)
         .eq("status", "waiting");
+
+      if (confirmError) throw confirmError;
+      if (esperandoError) throw esperandoError;
 
       const { data: capacidad } = await supabase
         .from("trip_buses")
@@ -103,8 +119,8 @@ async function getTripsSummary(groupId) {
         type: trip.type,
         startTime: trip.start_time,
         departureTime: trip.departure_datetime,
-        confirmed: confirmados?.length || 0,
-        waiting: esperando?.length || 0,
+        confirmed: confirmadosCount || 0,
+        waiting: esperandoCount || 0,
         capacity: totalCapacity,
         stops,
       };
