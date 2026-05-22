@@ -1,5 +1,4 @@
 const { createClient } = require("@supabase/supabase-js");
-const { formatTripTitle } = require("../utils/format");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
