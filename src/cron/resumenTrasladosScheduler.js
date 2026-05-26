@@ -27,7 +27,7 @@ function appendLog(logEntry) {
   }
 }
 
-function isJuevesOViernesAlas14ArgentinaTime() {
+function isJuevesOViernesALaHoraArgentinaTime() {
   const now = new Date();
   const argentinaFormatter = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Argentina/Buenos_Aires",
@@ -44,10 +44,12 @@ function isJuevesOViernesAlas14ArgentinaTime() {
   const hour = Number(parts.find((p) => p.type === "hour")?.value || -1);
   const minute = Number(parts.find((p) => p.type === "minute")?.value || -1);
 
-  const isJuevesOViernes = weekday === 4 || weekday === 5;
+  const isJueves = weekday === 4;
+  const isViernes = weekday === 5;
   const is14Hs = hour === 14 && minute === 0;
+  const is18Hs = hour === 18 && minute === 0;
 
-  return isJuevesOViernes && is14Hs;
+  return (isJueves && is14Hs) || (isViernes && is18Hs);
 }
 
 let lastExecutionDate = null;
@@ -133,14 +135,14 @@ function initResumenTrasladosScheduler() {
   console.log("[resumenTraslados] Iniciando scheduler...");
 
   cron.schedule("* * * * *", async () => {
-    if (isJuevesOViernesAlas14ArgentinaTime()) {
+    if (isJuevesOViernesALaHoraArgentinaTime()) {
       console.log("[resumenTraslados] Ejecutando envío programado...");
       await enviarResumenTraslados();
     }
   });
 
   console.log(
-    "[resumenTraslados] Scheduler activo. Enviará cada jueves y viernes a las 14:00 (America/Argentina/Buenos_Aires)"
+    "[resumenTraslados] Scheduler activo. Enviará: Jueves 14:00 y Viernes 18:00 (America/Argentina/Buenos_Aires)"
   );
 }
 
