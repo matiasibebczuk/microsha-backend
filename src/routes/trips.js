@@ -1824,6 +1824,28 @@ router.post("/:id/reinforcement", auth, requireRole("admin"), requireStaffGroup,
   }
 });
 
+router.post("/:id/debug-start-time", auth, requireRole("admin"), requireStaffGroup, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: trip, error } = await supabase
+      .from("trips")
+      .select("id, name, start_time, departure_datetime")
+      .eq("id", id)
+      .single();
+
+    if (error) return res.status(404).json({ error: "Trip not found" });
+
+    return res.json({
+      id: trip.id,
+      name: trip.name,
+      start_time_in_db: trip.start_time,
+      departure_datetime: trip.departure_datetime,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message });
+  }
+});
+
 // ========================
 // DELETE /trips/:id (eliminar)
 // ========================
