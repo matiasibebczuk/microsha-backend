@@ -915,6 +915,8 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
       waitlist_end_time,
     } = req.body;
 
+    console.log("[trips.POST] Creating trip:", { name, type, start_time });
+
     const payload = {
       name,
       type,
@@ -924,6 +926,9 @@ router.post("/", auth, requireRole("admin"), requireStaffGroup, async (req, res)
 
     if (start_time !== undefined) {
       payload.start_time = start_time ? normalizeClockTime(start_time) : null;
+      console.log("[trips.POST] Saved start_time:", payload.start_time);
+    } else {
+      console.log("[trips.POST] start_time was undefined");
     }
 
     if (waitlist_start_at !== undefined) {
