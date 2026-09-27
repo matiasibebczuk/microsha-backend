@@ -180,15 +180,45 @@ function renderPeopleList(items) {
   const rows = items.map((item) => {
     const name = escapeHtml(item?.name || "Sin nombre");
     const description = escapeHtml(item?.description || "-");
-    return `<li><b>${name}</b> · Description: ${description}</li>`;
+    return `<li><b>${name}</b> · ${description}</li>`;
   });
 
   return `<ul>${rows.join("")}</ul>`;
 }
 
+function renderAbsentPassengersList(items, attendanceValid = true) {
+  if (attendanceValid === false) {
+    return "<p><em>Lista no tomada (todos los pasajeros figuraban ausentes). No se computan ausencias ni aumentan rachas en este viaje.</em></p>";
+  }
+
+  if (!Array.isArray(items) || items.length === 0) {
+    return "<p>Sin ausencias registradas (asistencia completa).</p>";
+  }
+
+  const rows = items.map((item) => {
+    const name = escapeHtml(item?.name || "Sin nombre");
+    const description = escapeHtml(item?.description || "-");
+    const streak = item?.streak !== undefined && item?.streak !== null ? Number(item.streak) : 0;
+    const last5 = Array.isArray(item?.last5) && item.last5.length > 0 ? item.last5.join(" ") : "-";
+    return `<li><b>${name}</b> · ${description} · <b>Racha:</b> ${streak} · <b>Últimos 5:</b> ${escapeHtml(last5)}</li>`;
+  });
+
+  const legend = [
+    `<div style="margin-top: 12px; font-size: 12px; color: #555; border-left: 3px solid #ccc; padding-left: 8px;">`,
+    `<b>Referencia:</b><br />`,
+    `✓ = presente (cuenta)<br />`,
+    `✗ = ausente (cuenta para la racha)<br />`,
+    `— = lista no tomada (no cuenta)`,
+    `</div>`,
+  ].join("");
+
+  return `<ul>${rows.join("")}</ul>${legend}`;
+}
+
 async function notifyAdminsTripFinishedSummary({
   groupId,
   tripName,
+  attendanceValid = true,
   absentPassengers,
   lateCancellations,
   fridayCutoffLabel,
@@ -205,15 +235,18 @@ async function notifyAdminsTripFinishedSummary({
   const html = [
     `<h2>Finalización de traslado</h2>`,
     `<p><b>Traslado:</b> ${safeTripName}</p>`,
+    attendanceValid === false
+      ? `<p style="color: #b91c1c;"><b>Aviso:</b> La lista no fue tomada (todos los pasajeros ausentes). No se penalizó a los usuarios.</p>`
+      : "",
     `<hr />`,
     `<h3>1) Personas ausentes</h3>`,
     `<p>Anotados confirmados que no asistieron.</p>`,
-    renderPeopleList(absentPassengers),
+    renderAbsentPassengersList(absentPassengers, attendanceValid),
     `<hr />`,
     `<h3>2) Personas dadas de baja / desanotadas</h3>`,
     `<p>Solo se incluyen bajas desde ${safeCutoff}.</p>`,
     renderPeopleList(lateCancellations),
-  ].join("");
+  ].filter(Boolean).join("");
 
   return sendViaResend({ to, subject, html });
 }

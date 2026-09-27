@@ -10,6 +10,7 @@ const { isSanctionsEnabled } = require("../config/featureFlags");
 const { getLastFriday20Iso } = require("../utils/fridayWindow");
 const { notifyAdminsTripFinishedSummary } = require("../services/reinforcementNotifications");
 const { setSystemFlags } = require("../services/systemFlags");
+const { processManualFinalization } = require("../services/tripFinalization");
 
 const router = express.Router();
 
@@ -669,8 +670,7 @@ router.get("/trips/:tripId/state", async (req, res) => {
     }
 
     const activeRun = await getActiveRun(tripId);
-    const canManage =
-      !activeRun || !activeRun.taken_by || activeRun.taken_by === req.user.id;
+    const canManage = true;
 
     const { data: lastFinishedRun } = await supabase
       .from("trip_runs")
@@ -873,10 +873,6 @@ router.put("/reservations/:reservationId/boarded", async (req, res) => {
       return res.status(400).json({ error: "El recorrido todavía no fue iniciado" });
     }
 
-    if (activeRun.taken_by && activeRun.taken_by !== req.user.id) {
-      return res.status(403).json({ error: "Solo el encargado asignado puede tomar asistencia" });
-    }
-
     const { error } = await supabase
       .from("reservations")
       .update({ boarded })
@@ -974,142 +970,22 @@ router.post("/trips/:tripId/finish", async (req, res) => {
       return res.status(400).json({ error: "El recorrido ya fue finalizado o no fue iniciado" });
     }
 
-    if (activeRun.taken_by && activeRun.taken_by !== req.user.id) {
-      return res.status(403).json({ error: "Solo el encargado que inició puede finalizar" });
-    }
-
-    const runId = activeRun.id;
-    const finishedAt = new Date().toISOString();
-
-    const { error: finishRunError } = await supabase
-      .from("trip_runs")
-      .update({ finished_at: finishedAt })
-      .eq("id", runId);
-
-    if (finishRunError) {
-      return res.status(500).json({ error: finishRunError.message });
-    }
-
-    const passengers = await getTripPassengers(tripId);
-
-    const snapshot = passengers.map((p) => ({
-      run_id: runId,
-      user_name: p.users?.name || "Sin nombre",
-      phone: p.users?.phone || null,
-      stop_name: p.stops?.name || "Sin parada",
-      boarded: Boolean(p.boarded),
-    }));
-
-    if (snapshot.length > 0) {
-      const { error: insertError } = await supabase
-        .from("trip_run_passengers")
-        .insert(snapshot);
-
-      if (insertError) {
-        return res.status(500).json({ error: insertError.message });
-      }
-    }
-
-    try {
-      await persistTripHistorySnapshot({
-        run: activeRun,
-        trip,
-        passengers,
-        groupId: req.groupId,
-        finishedAt,
-      });
-    } catch (historyErr) {
-      console.error("⚠️ TRIP HISTORY SNAPSHOT ERROR:", historyErr);
-    }
-
-    await applyNoShowSanctions(passengers);
-
-    const absentPassengers = passengers
-      .filter((p) => p?.status === "confirmed" && !p?.boarded)
-      .map((p) => toPassengerInfo(p?.users));
-    const lateCancellations = await readLateCancellationsForTrip(tripId, finishedAt);
-
-    try {
-      const notifyResult = await notifyAdminsTripFinishedSummary({
-        groupId: req.groupId,
-        tripName: trip?.name || `Traslado ${tripId}`,
-        absentPassengers,
-        lateCancellations,
-        fridayCutoffLabel: "viernes 20:00 (America/Argentina/Buenos_Aires)",
-      });
-      if (!notifyResult?.sent) {
-        console.warn("[alerts] Trip finish summary not sent", {
-          tripId,
-          groupId: req.groupId,
-          reason: notifyResult?.reason || "unknown",
-          absentCount: absentPassengers.length,
-          cancellationsCount: lateCancellations.length,
-        });
-      }
-    } catch (notifyError) {
-      console.error("⚠️ TRIP FINISH EMAIL ERROR:", notifyError);
-    }
-
-    const { error: cleanupError } = await supabase
-      .from("reservations")
-      .delete()
-      .eq("trip_id", tripId);
-
-    if (cleanupError) {
-      return res.status(500).json({ error: cleanupError.message });
-    }
-
-    await cleanupForcedReinforcementAfterFinish(tripId);
-
-    const hasWaitlistSchedule = trip.waitlist_start_day !== null && trip.waitlist_start_day !== undefined && trip.waitlist_start_time;
-    if (hasWaitlistSchedule) {
-      const suspendUntil = getNextScheduleActivationIso(trip.waitlist_start_day, trip.waitlist_start_time);
-      if (suspendUntil) {
-        const { error: waitlistPauseError } = await supabase
-          .from("trips")
-          .update({ waitlist_end_at: suspendUntil })
-          .eq("id", tripId);
-
-        if (waitlistPauseError) {
-          return res.status(500).json({ error: waitlistPauseError.message });
-        }
-      }
-    }
-
-    try {
-      await upsertLocationSession(tripId, {
-        active: false,
-        stopped_at: finishedAt,
-      });
-    } catch (locationStopError) {
-      console.warn("⚠️ LOCATION AUTO-STOP AFTER FINISH ERROR:", locationStopError?.message || locationStopError);
-    }
-
-    try {
-      const { getSystemFlags } = require("../services/systemFlags");
-      const currentFlags = await getSystemFlags();
-      const originals = currentFlags?.busOriginalCapacities;
-      if (originals && typeof originals === "object") {
-        await Promise.all(
-          Object.entries(originals).map(([busId, cap]) =>
-            supabase.from("buses").update({ capacity: Number(cap) }).eq("id", Number(busId))
-          )
-        );
-      }
-      await setSystemFlags({ stopBlockActive: false, busCapacityOverride: null, busOriginalCapacities: null });
-    } catch (flagErr) {
-      console.warn("⚠️ FLAGS RESET ERROR:", flagErr?.message || flagErr);
-    }
+    const result = await processManualFinalization({
+      tripId,
+      runId: activeRun.id,
+      groupId: req.groupId,
+      user: req.user,
+    });
 
     return res.json({
       success: true,
-      runId,
-      removedReservations: passengers.length,
-      finishedAt,
+      runId: result.runId,
+      attendanceValid: result.attendanceValid,
+      finishedAt: result.finishedAt,
     });
   } catch (err) {
     console.error("🔥 FINISH TRIP ERROR:", err);
-    return res.status(500).json({ error: "Server exploded" });
+    return res.status(500).json({ error: err?.message || "Server exploded" });
   }
 });
 
