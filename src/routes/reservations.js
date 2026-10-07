@@ -101,14 +101,29 @@ async function getPassengerSuspension(userId) {
 }
 
 async function getTripStatus(tripId) {
-  const { data, error } = await supabase
-    .from("trips")
-    .select("name, type, status, departure_datetime, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
-    .eq("id", tripId)
-    .maybeSingle();
+  const [{ data, error }, { data: activeRun, error: runError }] = await Promise.all([
+    supabase
+      .from("trips")
+      .select("name, type, status, departure_datetime, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
+      .eq("id", tripId)
+      .maybeSingle(),
+    supabase
+      .from("trip_runs")
+      .select("id")
+      .eq("trip_id", tripId)
+      .is("finished_at", null)
+      .limit(1)
+      .maybeSingle(),
+  ]);
 
   if (error) throw error;
-  return data || null;
+  if (runError && runError.code !== "42P01") throw runError;
+
+  if (!data) return null;
+  return {
+    ...data,
+    hasActiveRun: Boolean(activeRun),
+  };
 }
 
 
@@ -509,8 +524,8 @@ router.post("/", requirePassengerSession, async (req, res) => {
       return res.status(403).json({ error: "No tenés permisos para anotarte en este viaje" });
     }
 
-    if (trip.status !== "open") {
-      return res.status(400).json({ error: "Inscripción cerrada" });
+    if (trip.status !== "open" || trip.hasActiveRun) {
+      return res.status(400).json({ error: "El traslado ya fue iniciado. La inscripción está cerrada." });
     }
 
     const waitlistWindowActive = isWaitlistWindowActive(trip);
@@ -689,13 +704,22 @@ router.delete("/", requirePassengerSession, async (req, res) => {
       return res.status(400).json({ error: "Missing data" });
     }
 
-    const [passengerGroupId, tripGroupId] = await Promise.all([
+    const [passengerGroupId, tripGroupId, trip] = await Promise.all([
       getPassengerGroupId(userId),
       getTripGroupId(tripId),
+      getTripStatus(tripId),
     ]);
 
     if (!passengerGroupId || !tripGroupId || String(passengerGroupId) !== String(tripGroupId)) {
       return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    if (!trip?.status) {
+      return res.status(404).json({ error: "Trip not found" });
+    }
+
+    if (trip.status !== "open" || trip.hasActiveRun) {
+      return res.status(400).json({ error: "El traslado ya fue iniciado. No es posible darse de baja." });
     }
 
     const { data: current, error: currentError } = await supabase
@@ -791,8 +815,8 @@ router.put("/change", requirePassengerSession, async (req, res) => {
       return res.status(403).json({ error: "No tenés permisos para este viaje" });
     }
 
-    if (trip.status !== "open") {
-      return res.status(400).json({ error: "Inscripción cerrada" });
+    if (trip.status !== "open" || trip.hasActiveRun) {
+      return res.status(400).json({ error: "El traslado ya fue iniciado. No es posible cambiar de parada." });
     }
 
     const { data: current, error: currentError } = await supabase

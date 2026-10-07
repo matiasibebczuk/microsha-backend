@@ -940,9 +940,257 @@ router.get("/trips/:tripId/dashboard", async (req, res) => {
     const missing = total - boarded;
     const waiting = waitingRows.length;
 
-    return res.json({ total, boarded, missing, waiting });
+    // Contabilizar también los pasajeros agregados manualmente al recorrido activo
+    const activeRun = await getActiveRun(tripId);
+    let unregisteredCount = 0;
+    if (activeRun?.id) {
+      const { count: unregCount, error: unregError } = await supabase
+        .from("trip_run_unregistered_passengers")
+        .select("*", { count: "exact", head: true })
+        .eq("trip_run_id", activeRun.id);
+
+      if (!unregError && Number.isFinite(unregCount)) {
+        unregisteredCount = Number(unregCount);
+      }
+    }
+
+    return res.json({
+      total: total + unregisteredCount,
+      boarded: boarded + unregisteredCount,
+      missing,
+      waiting,
+      registeredTotal: total,
+      registeredBoarded: boarded,
+      unregisteredCount,
+    });
   } catch (err) {
     console.error("🔥 ENCARGADO DASHBOARD ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+// ========================
+// BÚSQUEDA DE USUARIOS PARA AGREGAR AL SUBIR
+// ========================
+router.get("/users/search", async (req, res) => {
+  try {
+    const q = String(req.query?.q || "").trim();
+    if (!q) return res.json([]);
+
+    const safeQ = q.replace(/[%_]/g, "");
+    if (!safeQ) return res.json([]);
+
+    const expectedGroupId = String(req.groupId || "").trim();
+
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, name, dni, member_number, phone, description, role, group_number, organization_id")
+      .or(`name.ilike.%${safeQ}%,dni.ilike.%${safeQ}%,member_number.ilike.%${safeQ}%`)
+      .order("name", { ascending: true })
+      .limit(50);
+
+    if (error) {
+      console.error("🔥 ENCARGADO USERS SEARCH ERROR:", error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    const filtered = (Array.isArray(data) ? data : []).filter((row) => {
+      const gId = String(row?.group_number ?? row?.organization_id ?? "").trim();
+      if (gId && expectedGroupId && gId !== expectedGroupId) return false;
+      const role = String(row?.role || "").trim().toLowerCase();
+      return role !== "admin" && role !== "encargado";
+    });
+
+    return res.json(filtered.slice(0, 30));
+  } catch (err) {
+    console.error("🔥 ENCARGADO USERS SEARCH ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+// ========================
+// LISTAR PASAJEROS AGREGADOS AL SUBIR (UNREGISTERED)
+// ========================
+router.get("/trips/:tripId/unregistered", async (req, res) => {
+  try {
+    const { tripId } = req.params;
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const activeRun = await getActiveRun(tripId);
+    if (!activeRun?.id) {
+      return res.json([]);
+    }
+
+    const { data, error } = await supabase
+      .from("trip_run_unregistered_passengers")
+      .select(`
+        id,
+        trip_run_id,
+        user_id,
+        added_by,
+        added_at,
+        notes,
+        source,
+        users ( id, name, dni, phone, description, member_number )
+      `)
+      .eq("trip_run_id", activeRun.id)
+      .order("added_at", { ascending: true });
+
+    if (error) {
+      if (error.code === "42P01" || String(error.message || "").toLowerCase().includes("does not exist")) {
+        return res.json([]);
+      }
+      return res.status(500).json({ error: error.message });
+    }
+
+    const mapped = (Array.isArray(data) ? data : []).map((row) => ({
+      id: row.id,
+      tripRunId: row.trip_run_id,
+      userId: row.user_id,
+      name: row.users?.name || "Sin nombre",
+      dni: row.users?.dni || null,
+      phone: row.users?.phone || null,
+      description: row.users?.description || "",
+      memberNumber: row.users?.member_number || null,
+      addedAt: row.added_at,
+      addedBy: row.added_by,
+      notes: row.notes,
+      source: row.source,
+    }));
+
+    return res.json(mapped);
+  } catch (err) {
+    console.error("🔥 ENCARGADO GET UNREGISTERED ERROR:", err);
+    return res.status(500).json({ error: "Server exploded" });
+  }
+});
+
+// ========================
+// AGREGAR PERSONA AL SUBIR (MANUAL ON BOARDING)
+// ========================
+router.post("/trips/:tripId/unregistered", async (req, res) => {
+  try {
+    const { tripId } = req.params;
+    const { userId, notes } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ error: "user_id es requerido" });
+    }
+
+    const allowed = await assertTripInGroup(tripId, req.groupId);
+    if (!allowed) {
+      return res.status(403).json({ error: "No tenés permisos para este viaje" });
+    }
+
+    const activeRun = await getActiveRun(tripId);
+    if (!activeRun?.id) {
+      return res.status(400).json({ error: "El recorrido todavía no fue iniciado o ya fue finalizado" });
+    }
+
+    // 1. Verificar si la persona ya está anotada en las reservas de este traslado
+    const { data: existingReservation, error: resError } = await supabase
+      .from("reservations")
+      .select("id, status")
+      .eq("trip_id", Number(tripId))
+      .eq("user_id", String(userId))
+      .maybeSingle();
+
+    if (resError && resError.code !== "PGRST116") {
+      return res.status(500).json({ error: resError.message });
+    }
+
+    if (existingReservation) {
+      return res.status(400).json({ error: "Esta persona ya está anotada en este traslado." });
+    }
+
+    // 2. Verificar si ya fue agregada manualmente a este recorrido
+    const { data: alreadyAdded, error: addCheckError } = await supabase
+      .from("trip_run_unregistered_passengers")
+      .select("id")
+      .eq("trip_run_id", activeRun.id)
+      .eq("user_id", String(userId))
+      .maybeSingle();
+
+    if (addCheckError && addCheckError.code !== "PGRST116" && addCheckError.code !== "42P01") {
+      return res.status(500).json({ error: addCheckError.message });
+    }
+
+    if (alreadyAdded) {
+      return res.status(400).json({ error: "Esta persona ya fue agregada a este traslado." });
+    }
+
+    // 3. Obtener datos del usuario para auditoría
+    const { data: targetUser, error: userError } = await supabase
+      .from("users")
+      .select("id, name, dni, phone, description, member_number")
+      .eq("id", String(userId))
+      .maybeSingle();
+
+    if (userError || !targetUser) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // 4. Insertar en trip_run_unregistered_passengers
+    const { data: inserted, error: insertError } = await supabase
+      .from("trip_run_unregistered_passengers")
+      .insert({
+        trip_run_id: Number(activeRun.id),
+        user_id: String(userId),
+        added_by: String(req.user.id),
+        added_at: nowIso,
+        notes: notes ? String(notes).trim() : null,
+        source: "manual_on_boarding",
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      if (insertError.code === "23505" || String(insertError.message || "").toLowerCase().includes("unique")) {
+        return res.status(400).json({ error: "Esta persona ya fue agregada a este traslado." });
+      }
+      return res.status(500).json({ error: insertError.message });
+    }
+
+    // 5. Auditoría
+    try {
+      await appendAttendanceLog({
+        timestamp: nowIso,
+        event: "manual_on_boarding_added",
+        actor_user_id: req.user.id,
+        trip_id: Number(tripId),
+        trip_run_id: Number(activeRun.id),
+        user_id: String(userId),
+        user_name: targetUser.name || "Sin nombre",
+      });
+    } catch (logErr) {
+      console.warn("⚠️ ATTENDANCE LOG ERROR (unregistered passenger):", logErr);
+    }
+
+    return res.json({
+      success: true,
+      passenger: {
+        id: inserted?.id,
+        tripRunId: activeRun.id,
+        userId: targetUser.id,
+        name: targetUser.name || "Sin nombre",
+        dni: targetUser.dni || null,
+        phone: targetUser.phone || null,
+        description: targetUser.description || "",
+        memberNumber: targetUser.member_number || null,
+        addedAt: nowIso,
+        addedBy: req.user.id,
+        notes: notes || null,
+        source: "manual_on_boarding",
+      },
+    });
+  } catch (err) {
+    console.error("🔥 ENCARGADO ADD UNREGISTERED ERROR:", err);
     return res.status(500).json({ error: "Server exploded" });
   }
 });

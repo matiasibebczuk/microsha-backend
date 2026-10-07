@@ -392,8 +392,27 @@ async function processManualFinalization({ tripId, runId, groupId, user }) {
   // 1. Obtener pasajeros anotados actuales
   const passengers = await getTripPassengers(tripId);
 
-  // 2. Guardar trip_run_passengers incluyendo SIEMPRE user_id
-  const snapshot = passengers.map((p) => ({
+  // 1b. Obtener pasajeros agregados al subir (trip_run_unregistered_passengers)
+  let unregisteredPassengers = [];
+  try {
+    const { data: unregData, error: unregError } = await supabase
+      .from("trip_run_unregistered_passengers")
+      .select(`
+        user_id,
+        notes,
+        users ( name, phone )
+      `)
+      .eq("trip_run_id", Number(runId));
+
+    if (!unregError && Array.isArray(unregData)) {
+      unregisteredPassengers = unregData;
+    }
+  } catch (unregErr) {
+    console.warn("⚠️ Error fetching unregistered passengers during finalization:", unregErr);
+  }
+
+  // 2. Guardar trip_run_passengers incluyendo SIEMPRE user_id (anotados + agregados al subir)
+  const registeredSnapshot = passengers.map((p) => ({
     run_id: Number(runId),
     user_id: p.user_id ? String(p.user_id) : null,
     user_name: p.users?.name || "Sin nombre",
@@ -401,6 +420,17 @@ async function processManualFinalization({ tripId, runId, groupId, user }) {
     stop_name: p.stops?.name || "Sin parada",
     boarded: Boolean(p.boarded),
   }));
+
+  const unregisteredSnapshot = unregisteredPassengers.map((u) => ({
+    run_id: Number(runId),
+    user_id: u.user_id ? String(u.user_id) : null,
+    user_name: u.users?.name || "Sin nombre",
+    phone: u.users?.phone || null,
+    stop_name: u.notes || "Agregado al subir",
+    boarded: true, // Efectivamente subió al traslado
+  }));
+
+  const snapshot = [...registeredSnapshot, ...unregisteredSnapshot];
 
   if (snapshot.length > 0) {
     const { error: insertError } = await supabase
