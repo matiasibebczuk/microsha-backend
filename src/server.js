@@ -17,7 +17,8 @@ const { initAllSchedulers } = require("./cron");
 
 
 
-const app = express();   // ✅ primero crear
+const app = express();
+app.set("trust proxy", 1);
 const port = Number(process.env.PORT || 3000);
 const corsOrigin = process.env.CORS_ORIGIN || "*";
 
@@ -52,15 +53,8 @@ app.use(express.json());
 app.set("etag", "weak");
 app.use(compression({ threshold: 1024 }));
 
-// Rate limiting global: 200 requests por 15 minutos por IP
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 200,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Demasiadas solicitudes, esperá unos minutos" },
-  skip: (req) => req.path === "/ping",
-}));
+const { globalLimiter } = require("./middleware/rateLimiter");
+app.use(globalLimiter);
 
 
 app.get("/ping", (req, res) => {
@@ -75,6 +69,19 @@ app.use("/admin", adminRoutes);
 app.use("/me", meRoutes);
 app.use("/templates", templatesRoutes);
 app.use("/groups", groupsRoutes);
+
+// Global error handler ensuring JSON response and proper CORS handling
+app.use((err, req, res, next) => {
+  console.error("🔥 Global error handler:", err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  const status = Number(err?.status || err?.statusCode || 500);
+  return res.status(status).json({
+    error: err?.message || "Error interno del servidor",
+    code: err?.code || "INTERNAL_ERROR",
+  });
+});
 
 initAllSchedulers();
 

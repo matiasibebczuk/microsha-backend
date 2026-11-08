@@ -3,6 +3,8 @@ const { issuePassengerToken } = require("../middleware/passengerSession");
 const { requirePassengerSession } = require("../middleware/passengerSession");
 const { supabase } = require("../lib/supabaseClient");
 const { isSanctionsEnabled } = require("../config/featureFlags");
+const { authLimiter } = require("../middleware/rateLimiter");
+const { memoryCache } = require("../utils/cache");
 
 const router = express.Router();
 
@@ -45,7 +47,7 @@ const withTimeout = async (promise, ms, label) => {
   }
 };
 
-router.post("/register-staff", async (req, res) => {
+router.post("/register-staff", authLimiter, async (req, res) => {
   try {
     const { name, lastname, email, password, role } = req.body || {};
 
@@ -168,7 +170,7 @@ router.post("/passenger", async (req, res) => {
   }
 });
 
-router.post("/passenger-login", async (req, res) => {
+router.post("/passenger-login", authLimiter, async (req, res) => {
   try {
     const { dni, memberNumber } = req.body;
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -186,7 +188,7 @@ router.post("/passenger-login", async (req, res) => {
 
     const { data: users, error } = await supabase
       .from("users")
-      .select("id, name, role, phone, description, suspended_until, suspension_reason")
+      .select("id, name, role, phone, description, suspended_until, suspension_reason, group_number, organization_id")
       .eq("dni", dni)
       .eq("member_number", memberNumber)
       .limit(2);
@@ -237,7 +239,14 @@ router.post("/passenger-login", async (req, res) => {
       });
     }
 
-    const passengerToken = issuePassengerToken(user.id);
+    const userGroupId = user.group_number ?? user.organization_id ?? null;
+    const cleanGroupId = userGroupId ? String(userGroupId) : null;
+    if (cleanGroupId) {
+      memoryCache.set(`passenger_group:${user.id}`, cleanGroupId, 5 * 60 * 1000);
+    }
+    memoryCache.set(`suspension:${user.id}`, null, 30 * 1000);
+
+    const passengerToken = issuePassengerToken(user.id, cleanGroupId);
 
     const normalizedPhone = normalizePhone(user.phone);
     const normalizedDescription = normalizeDescription(user.description);

@@ -1,5 +1,6 @@
 const express = require("express");
-const { createClient } = require("@supabase/supabase-js");
+const { supabase } = require("../lib/supabaseClient");
+const { memoryCache } = require("../utils/cache");
 const auth = require("../middleware/auth");
 const { requireRole } = require("../middleware/roles");
 const { requireStaffGroup, assertTripInGroup } = require("../middleware/groupAccess");
@@ -13,11 +14,6 @@ const { setSystemFlags } = require("../services/systemFlags");
 const { processManualFinalization } = require("../services/tripFinalization");
 
 const router = express.Router();
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
 
 const logsDir = path.join(__dirname, "..", "..", "logs");
 const attendanceLogPath = path.join(logsDir, "attendance-log.jsonl");
@@ -642,6 +638,9 @@ router.post("/trips/:tripId/start", async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
+    memoryCache.del(`trip_status:${tripId}`);
+    memoryCache.delPrefix("trips_list:");
+
     return res.json({
       success: true,
       tripStatus: "closed",
@@ -1224,6 +1223,9 @@ router.post("/trips/:tripId/finish", async (req, res) => {
       groupId: req.groupId,
       user: req.user,
     });
+
+    memoryCache.del(`trip_status:${tripId}`);
+    memoryCache.delPrefix("trips_list:");
 
     return res.json({
       success: true,

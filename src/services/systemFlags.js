@@ -1,17 +1,7 @@
 const fs = require("fs");
 const path = require("path");
-const { createClient } = require("@supabase/supabase-js");
-
-const dataDir = path.join(__dirname, "..", "..", "data");
-const flagsPath = path.join(dataDir, "system-flags.json");
-const ARGENTINA_TIMEZONE = "America/Argentina/Buenos_Aires";
-const DAY_MS = 24 * 60 * 60 * 1000;
-const FLAGS_ROW_ID = 1;
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const { supabase } = require("../lib/supabaseClient");
+const { memoryCache } = require("../utils/cache");
 
 const DEFAULT_FLAGS = {
   tripsPaused: false,
@@ -254,6 +244,7 @@ async function readFlagsFromFile() {
 }
 
 async function writeFlagsToFile(next) {
+  memoryCache.del("system_flags");
   await fs.promises.mkdir(dataDir, { recursive: true });
   await fs.promises.writeFile(flagsPath, JSON.stringify(normalizeFlags(next), null, 2), "utf8");
 }
@@ -306,6 +297,7 @@ async function readFlagsFromDb() {
 }
 
 async function writeFlagsToDb(next) {
+  memoryCache.del("system_flags");
   const flags = normalizeFlags(next);
   const payload = {
     id: FLAGS_ROW_ID,
@@ -344,43 +336,45 @@ async function writeFlagsToDb(next) {
 }
 
 async function getSystemFlags() {
-  try {
-    const dbResult = await readFlagsFromDb();
-    if (dbResult.supported) {
-      let base = dbResult.flags;
-      if (!base) {
-        const fileBase = await readFlagsFromFile();
-        const seed = normalizeFlags(fileBase || DEFAULT_FLAGS);
-        await writeFlagsToDb(seed);
-        base = seed;
+  return memoryCache.getOrSet("system_flags", async () => {
+    try {
+      const dbResult = await readFlagsFromDb();
+      if (dbResult.supported) {
+        let base = dbResult.flags;
+        if (!base) {
+          const fileBase = await readFlagsFromFile();
+          const seed = normalizeFlags(fileBase || DEFAULT_FLAGS);
+          await writeFlagsToDb(seed);
+          base = seed;
+        }
+
+        const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(base, async (next) => {
+          await writeFlagsToDb(next);
+        });
+        const { flags: afterOpen } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
+          await writeFlagsToDb(next);
+        });
+        const { flags } = await applyScheduledStopBlockIfDueWithSaver(afterOpen, async (next) => {
+          await writeFlagsToDb(next);
+        });
+        return flags;
       }
-
-      const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(base, async (next) => {
-        await writeFlagsToDb(next);
-      });
-      const { flags: afterOpen } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
-        await writeFlagsToDb(next);
-      });
-      const { flags } = await applyScheduledStopBlockIfDueWithSaver(afterOpen, async (next) => {
-        await writeFlagsToDb(next);
-      });
-      return flags;
+    } catch {
+      // Fall through to file storage to keep app operational.
     }
-  } catch {
-    // Fall through to file storage to keep app operational.
-  }
 
-  const normalized = await readFlagsFromFile();
-  const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(normalized, async (next) => {
-    await writeFlagsToFile(next);
-  });
-  const { flags: afterOpen } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
-    await writeFlagsToFile(next);
-  });
-  const { flags } = await applyScheduledStopBlockIfDueWithSaver(afterOpen, async (next) => {
-    await writeFlagsToFile(next);
-  });
-  return flags;
+    const normalized = await readFlagsFromFile();
+    const { flags: afterPause } = await applyScheduledPauseIfDueWithSaver(normalized, async (next) => {
+      await writeFlagsToFile(next);
+    });
+    const { flags: afterOpen } = await applyScheduledOpenIfDueWithSaver(afterPause, async (next) => {
+      await writeFlagsToFile(next);
+    });
+    const { flags } = await applyScheduledStopBlockIfDueWithSaver(afterOpen, async (next) => {
+      await writeFlagsToFile(next);
+    });
+    return flags;
+  }, 10000);
 }
 
 async function setSystemFlags(patch) {

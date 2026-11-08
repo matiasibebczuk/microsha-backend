@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
+const { memoryCache } = require("../utils/cache");
 
 const dataDir = path.join(__dirname, "..", "..", "data");
 const storePath = path.join(dataDir, "groups.json");
@@ -354,6 +355,10 @@ async function joinGroupByCredentials({ name, password }) {
 }
 
 async function assignTripToGroup(tripId, groupId) {
+  memoryCache.del(`trip_group:${tripId}`);
+  memoryCache.del(`group_trips:${groupId}`);
+  memoryCache.delPrefix("trips_list:");
+
   if (supabase) {
     try {
       const idDbType = await getStaffGroupIdDbType();
@@ -381,62 +386,66 @@ async function assignTripToGroup(tripId, groupId) {
 }
 
 async function getTripGroupId(tripId) {
-  if (supabase) {
-    try {
-      const { data, error } = await supabase
-        .from("trip_groups")
-        .select("group_id")
-        .eq("trip_id", Number(tripId))
-        .maybeSingle();
-      if (!error) return data?.group_id ? String(data.group_id) : null;
-      if (!isRecoverableDbError(error)) return null;
-    } catch (err) {
-      if (!isRecoverableDbError(err)) return null;
+  return memoryCache.getOrSet(`trip_group:${tripId}`, async () => {
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from("trip_groups")
+          .select("group_id")
+          .eq("trip_id", Number(tripId))
+          .maybeSingle();
+        if (!error) return data?.group_id ? String(data.group_id) : null;
+        if (!isRecoverableDbError(error)) return null;
+      } catch (err) {
+        if (!isRecoverableDbError(err)) return null;
+      }
     }
-  }
 
-  if (!shouldUseFileFallback) return null;
+    if (!shouldUseFileFallback) return null;
 
-  const store = await loadStore();
-  return store.tripGroups[String(tripId)] || null;
+    const store = await loadStore();
+    return store.tripGroups[String(tripId)] || null;
+  }, 60 * 1000);
 }
 
 async function getTripIdsForGroup(groupId) {
-  if (supabase) {
-    try {
-      const idDbType = await getStaffGroupIdDbType();
-      const castGroupId = castGroupIdForDb(groupId, idDbType);
-      if (castGroupId === null) return [];
+  return memoryCache.getOrSet(`group_trips:${groupId}`, async () => {
+    if (supabase) {
+      try {
+        const idDbType = await getStaffGroupIdDbType();
+        const castGroupId = castGroupIdForDb(groupId, idDbType);
+        if (castGroupId === null) return [];
 
-      const { data, error } = await supabase
-        .from("trip_groups")
-        .select("trip_id")
-        .eq("group_id", castGroupId);
+        const { data, error } = await supabase
+          .from("trip_groups")
+          .select("trip_id")
+          .eq("group_id", castGroupId);
 
-      if (!error) {
-        return (data || [])
-          .map((row) => Number(row.trip_id))
-          .filter((id) => Number.isFinite(id));
-      }
-      if (!isRecoverableDbError(error)) {
-        return [];
-      }
-    } catch (err) {
-      if (!isRecoverableDbError(err)) {
-        return [];
+        if (!error) {
+          return (data || [])
+            .map((row) => Number(row.trip_id))
+            .filter((id) => Number.isFinite(id));
+        }
+        if (!isRecoverableDbError(error)) {
+          return [];
+        }
+      } catch (err) {
+        if (!isRecoverableDbError(err)) {
+          return [];
+        }
       }
     }
-  }
 
-  if (!shouldUseFileFallback) return [];
+    if (!shouldUseFileFallback) return [];
 
-  const store = await loadStore();
-  const wanted = String(groupId);
+    const store = await loadStore();
+    const wanted = String(groupId);
 
-  return Object.entries(store.tripGroups)
-    .filter(([, gId]) => String(gId) === wanted)
-    .map(([tripId]) => Number(tripId))
-    .filter((id) => Number.isFinite(id));
+    return Object.entries(store.tripGroups)
+      .filter(([, gId]) => String(gId) === wanted)
+      .map(([tripId]) => Number(tripId))
+      .filter((id) => Number.isFinite(id));
+  }, 30 * 1000);
 }
 
 async function getUnassignedTripIds(tripIds) {

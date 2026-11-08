@@ -1,7 +1,9 @@
 const express = require("express");
-const { createClient } = require("@supabase/supabase-js");
 const fs = require("fs");
 const path = require("path");
+const { supabase } = require("../lib/supabaseClient");
+const { memoryCache } = require("../utils/cache");
+const { reservationMutationLimiter, pollingLimiter } = require("../middleware/rateLimiter");
 const { requirePassengerSession } = require("../middleware/passengerSession");
 const { getPassengerGroupId } = require("../middleware/groupAccess");
 const { getTripGroupId, assignTripToGroup } = require("../middleware/groupStore");
@@ -14,33 +16,30 @@ const router = express.Router();
 const logsDir = path.join(__dirname, "..", "..", "logs");
 const cancellationsLogPath = path.join(logsDir, "reservation-cancellations.jsonl");
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
 async function getTripCapacity(tripId) {
-  const flags = await getSystemFlags();
-  if (flags?.busCapacityOverride != null && Number.isFinite(flags.busCapacityOverride) && flags.busCapacityOverride > 0) {
-    // Contamos cuántos micros tiene el traslado y multiplicamos por el override
+  return memoryCache.getOrSet(`trip_capacity:${tripId}`, async () => {
+    const flags = await getSystemFlags();
+    if (flags?.busCapacityOverride != null && Number.isFinite(flags.busCapacityOverride) && flags.busCapacityOverride > 0) {
+      // Contamos cuántos micros tiene el traslado y multiplicamos por el override
+      const { data, error } = await supabase
+        .from("trip_buses")
+        .select("bus_id")
+        .eq("trip_id", tripId);
+      if (error) throw error;
+      return (data?.length || 1) * flags.busCapacityOverride;
+    }
+
     const { data, error } = await supabase
       .from("trip_buses")
-      .select("bus_id")
+      .select("buses ( capacity )")
       .eq("trip_id", tripId);
+
     if (error) throw error;
-    return (data?.length || 1) * flags.busCapacityOverride;
-  }
 
-  const { data, error } = await supabase
-    .from("trip_buses")
-    .select("buses ( capacity )")
-    .eq("trip_id", tripId);
-
-  if (error) throw error;
-
-  return (
-    data?.reduce((sum, row) => sum + (row.buses?.capacity || 0), 0) || 0
-  );
+    return (
+      data?.reduce((sum, row) => sum + (row.buses?.capacity || 0), 0) || 0
+    );
+  }, 15000);
 }
 
 async function appendCancellationLog(entry) {
@@ -81,49 +80,54 @@ async function getPauseState() {
 async function getPassengerSuspension(userId) {
   if (!isSanctionsEnabled()) return null;
   if (!userId) return null;
-  const { data, error } = await supabase
-    .from("users")
-    .select("id, suspended_until, suspension_reason")
-    .eq("id", userId)
-    .maybeSingle();
 
-  if (error || !data) return null;
-  if (!data.suspended_until) return null;
+  return memoryCache.getOrSet(`suspension:${userId}`, async () => {
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, suspended_until, suspension_reason")
+      .eq("id", userId)
+      .maybeSingle();
 
-  const until = new Date(data.suspended_until);
-  if (Number.isNaN(until.getTime())) return null;
-  if (until.getTime() <= Date.now()) return null;
+    if (error || !data) return null;
+    if (!data.suspended_until) return null;
 
-  return {
-    suspendedUntil: data.suspended_until,
-    reason: data.suspension_reason || "Sanción activa",
-  };
+    const until = new Date(data.suspended_until);
+    if (Number.isNaN(until.getTime())) return null;
+    if (until.getTime() <= Date.now()) return null;
+
+    return {
+      suspendedUntil: data.suspended_until,
+      reason: data.suspension_reason || "Sanción activa",
+    };
+  }, 30000);
 }
 
 async function getTripStatus(tripId) {
-  const [{ data, error }, { data: activeRun, error: runError }] = await Promise.all([
-    supabase
-      .from("trips")
-      .select("name, type, status, departure_datetime, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
-      .eq("id", tripId)
-      .maybeSingle(),
-    supabase
-      .from("trip_runs")
-      .select("id")
-      .eq("trip_id", tripId)
-      .is("finished_at", null)
-      .limit(1)
-      .maybeSingle(),
-  ]);
+  return memoryCache.getOrSet(`trip_status:${tripId}`, async () => {
+    const [{ data, error }, { data: activeRun, error: runError }] = await Promise.all([
+      supabase
+        .from("trips")
+        .select("name, type, status, departure_datetime, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
+        .eq("id", tripId)
+        .maybeSingle(),
+      supabase
+        .from("trip_runs")
+        .select("id")
+        .eq("trip_id", tripId)
+        .is("finished_at", null)
+        .limit(1)
+        .maybeSingle(),
+    ]);
 
-  if (error) throw error;
-  if (runError && runError.code !== "42P01") throw runError;
+    if (error) throw error;
+    if (runError && runError.code !== "42P01") throw runError;
 
-  if (!data) return null;
-  return {
-    ...data,
-    hasActiveRun: Boolean(activeRun),
-  };
+    if (!data) return null;
+    return {
+      ...data,
+      hasActiveRun: Boolean(activeRun),
+    };
+  }, 2000);
 }
 
 
@@ -454,7 +458,7 @@ async function promoteWaitingPassengersIfNeeded(tripId) {
 // ========================
 // CREAR RESERVA
 // ========================
-router.post("/", requirePassengerSession, async (req, res) => {
+router.post("/", reservationMutationLimiter, requirePassengerSession, async (req, res) => {
   try {
     const systemFlags = await getSystemFlags();
     if (systemFlags?.tripsPaused) {
@@ -577,6 +581,8 @@ router.post("/", requirePassengerSession, async (req, res) => {
         if (atomicResult.existing) {
           return res.json({ status, existing: true });
         }
+        memoryCache.del(`trip_status:${tripId}`);
+        memoryCache.delPrefix("trips_list:");
         if (atomicResult.updated) {
           return res.json({ status, updated: true });
         }
@@ -677,6 +683,9 @@ router.post("/", requirePassengerSession, async (req, res) => {
       autoPromotedCount = promotionResult.promotedCount || 0;
     }
 
+    memoryCache.del(`trip_status:${tripId}`);
+    memoryCache.delPrefix("trips_list:");
+
     res.json({
       status,
       autoPromotedCount,
@@ -695,7 +704,7 @@ router.post("/", requirePassengerSession, async (req, res) => {
 // ========================
 // CANCELAR
 // ========================
-router.delete("/", requirePassengerSession, async (req, res) => {
+router.delete("/", reservationMutationLimiter, requirePassengerSession, async (req, res) => {
   try {
     const { tripId } = req.body;
     const userId = req.passengerUserId;
@@ -766,6 +775,9 @@ router.delete("/", requirePassengerSession, async (req, res) => {
         : null;
     }
 
+    memoryCache.del(`trip_status:${tripId}`);
+    memoryCache.delPrefix("trips_list:");
+
     return res.json({ success: true, promotedReservationId });
 
   } catch (err) {
@@ -778,7 +790,7 @@ router.delete("/", requirePassengerSession, async (req, res) => {
 // ========================
 // CAMBIAR PARADA
 // ========================
-router.put("/change", requirePassengerSession, async (req, res) => {
+router.put("/change", reservationMutationLimiter, requirePassengerSession, async (req, res) => {
   try {
     const pauseState = await getPauseState();
     if (pauseState.paused) {
@@ -842,6 +854,9 @@ router.put("/change", requirePassengerSession, async (req, res) => {
 
     if (updateError) return res.status(500).json({ error: updateError.message });
 
+    memoryCache.del(`trip_status:${tripId}`);
+    memoryCache.delPrefix("trips_list:");
+
     return res.json({ status: reservation.status });
 
   } catch (err) {
@@ -851,10 +866,38 @@ router.put("/change", requirePassengerSession, async (req, res) => {
 });
 
 
+async function getCachedStopsMap(stopIds) {
+  const result = new Map();
+  const missingIds = [];
+
+  for (const id of stopIds) {
+    const cached = memoryCache.get(`stop:${id}`);
+    if (cached !== undefined) {
+      result.set(String(id), cached);
+    } else {
+      missingIds.push(id);
+    }
+  }
+
+  if (missingIds.length > 0) {
+    const { data: dbStops } = await supabase
+      .from("stops")
+      .select("id, name")
+      .in("id", missingIds);
+
+    for (const stop of (dbStops || [])) {
+      memoryCache.set(`stop:${stop.id}`, stop, 10 * 60 * 1000);
+      result.set(String(stop.id), stop);
+    }
+  }
+
+  return result;
+}
+
 // ========================
 // MIS RESERVAS (TODOS LOS VIAJES)
 // ========================
-router.get("/mine", requirePassengerSession, async (req, res) => {
+router.get("/mine", pollingLimiter, requirePassengerSession, async (req, res) => {
   try {
     const userId = req.passengerUserId;
 
@@ -879,15 +922,12 @@ router.get("/mine", requirePassengerSession, async (req, res) => {
     const tripIds = [...new Set(reservations.map((row) => row.trip_id).filter(Boolean))];
     const stopIds = [...new Set(reservations.map((row) => row.stop_id).filter(Boolean))];
 
-    const [tripsResult, stopsResult, tripStopsResult] = await Promise.all([
+    const [tripsResult, stopsMap, tripStopsResult] = await Promise.all([
       supabase
         .from("trips")
         .select("id, type")
         .in("id", tripIds),
-      supabase
-        .from("stops")
-        .select("id, name")
-        .in("id", stopIds),
+      getCachedStopsMap(stopIds),
       supabase
         .from("trip_stops")
         .select("trip_id, stop_id, pickup_time")
@@ -898,15 +938,11 @@ router.get("/mine", requirePassengerSession, async (req, res) => {
     if (tripsResult.error) {
       return res.status(500).json({ error: tripsResult.error.message });
     }
-    if (stopsResult.error) {
-      return res.status(500).json({ error: stopsResult.error.message });
-    }
     if (tripStopsResult.error) {
       return res.status(500).json({ error: tripStopsResult.error.message });
     }
 
     const tripsMap = new Map((tripsResult.data || []).map((trip) => [String(trip.id), trip]));
-    const stopsMap = new Map((stopsResult.data || []).map((stop) => [String(stop.id), stop]));
     const tripStopTimeMap = new Map(
       (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, normalizeClockTime(row.pickup_time) || null])
     );
@@ -978,7 +1014,7 @@ router.get("/me", requirePassengerSession, async (req, res) => {
   }
 });
 
-router.get("/notifications", requirePassengerSession, async (req, res) => {
+router.get("/notifications", pollingLimiter, requirePassengerSession, async (req, res) => {
   try {
     const userId = req.passengerUserId;
 
@@ -1005,15 +1041,12 @@ router.get("/notifications", requirePassengerSession, async (req, res) => {
     const tripIds = [...new Set(pending.map((r) => r.trip_id).filter(Boolean))];
     const stopIds = [...new Set(pending.map((r) => r.stop_id).filter(Boolean))];
 
-    const [tripsResult, stopsResult, tripStopsResult] = await Promise.all([
+    const [tripsResult, stopsMap, tripStopsResult] = await Promise.all([
       supabase
         .from("trips")
         .select("id, type, name")
         .in("id", tripIds),
-      supabase
-        .from("stops")
-        .select("id, name")
-        .in("id", stopIds),
+      getCachedStopsMap(stopIds),
       supabase
         .from("trip_stops")
         .select("trip_id, stop_id, pickup_time")
@@ -1024,15 +1057,11 @@ router.get("/notifications", requirePassengerSession, async (req, res) => {
     if (tripsResult.error) {
       return res.status(500).json({ error: tripsResult.error.message });
     }
-    if (stopsResult.error) {
-      return res.status(500).json({ error: stopsResult.error.message });
-    }
     if (tripStopsResult.error) {
       return res.status(500).json({ error: tripStopsResult.error.message });
     }
 
     const tripsMap = new Map((tripsResult.data || []).map((trip) => [String(trip.id), trip]));
-    const stopsMap = new Map((stopsResult.data || []).map((stop) => [String(stop.id), stop]));
     const tripStopTimeMap = new Map(
       (tripStopsResult.data || []).map((row) => [`${row.trip_id}-${row.stop_id}`, normalizeClockTime(row.pickup_time) || null])
     );

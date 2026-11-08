@@ -1,14 +1,10 @@
-const { createClient } = require("@supabase/supabase-js");
+const { supabase } = require("../lib/supabaseClient");
+const { memoryCache } = require("../utils/cache");
 const {
   getStaffGroupByUserId,
   getTripGroupId,
   getGroupPublicById,
 } = require("./groupStore");
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
 
 async function getStaffGroupId(user) {
   const userId = user?.id;
@@ -32,16 +28,18 @@ async function getStaffGroupId(user) {
 async function getPassengerGroupId(userId) {
   if (!userId) return null;
 
-  const { data, error } = await supabase
-    .from("users")
-    .select("group_number, organization_id")
-    .eq("id", userId)
-    .maybeSingle();
+  return memoryCache.getOrSet(`passenger_group:${userId}`, async () => {
+    const { data, error } = await supabase
+      .from("users")
+      .select("group_number, organization_id")
+      .eq("id", userId)
+      .maybeSingle();
 
-  if (error || !data) return null;
+    if (error || !data) return null;
 
-  const groupId = data.group_number ?? data.organization_id ?? null;
-  return groupId ? String(groupId) : null;
+    const groupId = data.group_number ?? data.organization_id ?? null;
+    return groupId ? String(groupId) : null;
+  }, 5 * 60 * 1000);
 }
 
 async function requireStaffGroup(req, res, next) {

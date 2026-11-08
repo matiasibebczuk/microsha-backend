@@ -1,5 +1,7 @@
 const express = require("express");
-const { createClient } = require("@supabase/supabase-js");
+const { supabase } = require("../lib/supabaseClient");
+const { memoryCache } = require("../utils/cache");
+const { pollingLimiter } = require("../middleware/rateLimiter");
 const auth = require("../middleware/auth");
 const { requireRole, resolveUserRole } = require("../middleware/roles");
 const {
@@ -28,10 +30,13 @@ const {
 
 const router = express.Router();
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+router.use((req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
+    memoryCache.delPrefix("trips_list:");
+    memoryCache.delPrefix("trip_status:");
+  }
+  next();
+});
 
 async function resolveRequestGroupId(req) {
   const authHeader = req.headers.authorization || "";
@@ -70,7 +75,7 @@ async function resolveRequestGroupId(req) {
     return { error: "Group context required", status: 401 };
   }
 
-  const passengerGroupId = await getPassengerGroupId(passengerPayload.userId);
+  const passengerGroupId = passengerPayload.groupId || (await getPassengerGroupId(passengerPayload.userId));
   if (!passengerGroupId) {
     return { error: "El pasajero no pertenece a un grupo", status: 403 };
   }
@@ -428,48 +433,41 @@ function sortTrasladosByHora(trips) {
 // ========================
 // GET /trips
 // ========================
-router.get("/", async (req, res) => {
-  try {
-    const systemFlags = await getSystemFlags();
-    const context = await resolveRequestGroupId(req);
-    if (!context.groupId) {
-      return res.status(context.status || 401).json({ error: context.error || "No group context" });
-    }
+async function fetchTripsForGroup(context, systemFlags) {
+  const allowedTripIds = await getTripIdsForGroup(context.groupId);
 
-    const allowedTripIds = await getTripIdsForGroup(context.groupId);
+  let mergedTripIds = [...allowedTripIds];
 
-    let mergedTripIds = [...allowedTripIds];
+  if (context.mode === "staff" && context.groupValid !== false) {
+    const { data: allTripsForRepair, error: allTripsError } = await supabase
+      .from("trips")
+      .select("id")
+      .in("status", ["open", "closed"]);
 
-    if (context.mode === "staff" && context.groupValid !== false) {
-      const { data: allTripsForRepair, error: allTripsError } = await supabase
-        .from("trips")
-        .select("id")
-        .in("status", ["open", "closed"]);
+    throwIfSupabaseError(allTripsError, "trip repair scan failed");
 
-      throwIfSupabaseError(allTripsError, "trip repair scan failed");
+    const allIds = (Array.isArray(allTripsForRepair) ? allTripsForRepair : [])
+      .map((trip) => Number(trip.id))
+      .filter((id) => Number.isFinite(id));
 
-      const allIds = (Array.isArray(allTripsForRepair) ? allTripsForRepair : [])
-        .map((trip) => Number(trip.id))
-        .filter((id) => Number.isFinite(id));
+    const unassignedTripIds = await getUnassignedTripIds(allIds);
 
-      const unassignedTripIds = await getUnassignedTripIds(allIds);
-
-      if (unassignedTripIds.length > 0) {
-        const assignmentResults = await Promise.allSettled(
-          unassignedTripIds.map((tripId) => assignTripToGroup(tripId, context.groupId))
-        );
-        const failedAssignments = assignmentResults.filter((result) => result.status === "rejected");
-        if (failedAssignments.length > 0) {
-          console.warn("⚠️ Some trip group auto-assignments failed:", failedAssignments.length);
-        }
+    if (unassignedTripIds.length > 0) {
+      const assignmentResults = await Promise.allSettled(
+        unassignedTripIds.map((tripId) => assignTripToGroup(tripId, context.groupId))
+      );
+      const failedAssignments = assignmentResults.filter((result) => result.status === "rejected");
+      if (failedAssignments.length > 0) {
+        console.warn("⚠️ Some trip group auto-assignments failed:", failedAssignments.length);
       }
-
-      mergedTripIds = Array.from(new Set([...allowedTripIds, ...unassignedTripIds]));
     }
 
-    if (mergedTripIds.length === 0) {
-      return res.json([]);
-    }
+    mergedTripIds = Array.from(new Set([...allowedTripIds, ...unassignedTripIds]));
+  }
+
+  if (mergedTripIds.length === 0) {
+    return [];
+  }
 
     const rpcTripIds = mergedTripIds
       .map((id) => Number(id))
@@ -565,7 +563,7 @@ router.get("/", async (req, res) => {
           };
         });
 
-        return res.json(sortTrasladosByHora(rpcResult));
+        return sortTrasladosByHora(rpcResult);
       }
 
       if (rpcError) {
@@ -749,8 +747,26 @@ router.get("/", async (req, res) => {
     // 3) CREATE INDEX IF NOT EXISTS idx_trip_stops_trip_order ON trip_stops (trip_id, order_index);
     // 4) CREATE INDEX IF NOT EXISTS idx_trip_runs_trip_finished_id ON trip_runs (trip_id, finished_at, id DESC);
 
-    return res.json(sortTrasladosByHora(result));
+    return sortTrasladosByHora(result);
+}
 
+// ========================
+// GET /trips (with single-flight request coalescing and polling limiter)
+// ========================
+router.get("/", pollingLimiter, async (req, res) => {
+  try {
+    const systemFlags = await getSystemFlags();
+    const context = await resolveRequestGroupId(req);
+    if (!context.groupId) {
+      return res.status(context.status || 401).json({ error: context.error || "No group context" });
+    }
+
+    const cacheKey = `trips_list:${context.groupId}:${context.mode}`;
+    const trips = await memoryCache.getOrSet(cacheKey, async () => {
+      return await fetchTripsForGroup(context, systemFlags);
+    }, 2000);
+
+    return res.json(trips);
   } catch (err) {
     console.error("🔥 TRIPS ERROR:", err);
     const status = err?.status || 500;

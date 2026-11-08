@@ -26,9 +26,25 @@ function signPayload(payloadJson) {
     .digest("hex");
 }
 
-function issuePassengerToken(userId, ttlSeconds = 60 * 60 * 12) {
+function issuePassengerToken(userId, groupIdOrTtl = null, maybeTtl = 60 * 60 * 12) {
+  let groupId = null;
+  let ttlSeconds = 60 * 60 * 12;
+
+  if (typeof groupIdOrTtl === "number") {
+    ttlSeconds = groupIdOrTtl;
+  } else {
+    groupId = groupIdOrTtl ? String(groupIdOrTtl) : null;
+    if (typeof maybeTtl === "number") {
+      ttlSeconds = maybeTtl;
+    }
+  }
+
   const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
-  const payload = JSON.stringify({ userId, exp });
+  const payloadObj = { userId, exp };
+  if (groupId) {
+    payloadObj.groupId = groupId;
+  }
+  const payload = JSON.stringify(payloadObj);
   const encodedPayload = base64urlEncode(payload);
   const signature = signPayload(payload);
   return `${encodedPayload}.${signature}`;
@@ -98,6 +114,7 @@ function requirePassengerSession(req, res, next) {
   }
 
   req.passengerUserId = payload.userId;
+  req.passengerGroupId = payload.groupId || null;
   return next();
 }
 
