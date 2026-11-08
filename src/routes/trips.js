@@ -480,7 +480,7 @@ async function fetchTripsForGroup(context, systemFlags) {
         p_trip_ids: rpcTripIds,
       });
 
-      if (!rpcError && Array.isArray(rpcRows)) {
+      if (!rpcError && Array.isArray(rpcRows) && rpcRows.length > 0) {
         const locationMap = await getActiveLocationSessionsMap(rpcTripIds);
         const rpcIds = rpcRows
           .map((row) => Number(row.id))
@@ -491,79 +491,82 @@ async function fetchTripsForGroup(context, systemFlags) {
           .select("id, waitlist_start_at, waitlist_end_at, waitlist_start_day, waitlist_start_time, waitlist_end_day, waitlist_end_time")
           .in("id", rpcIds);
 
-        throwIfSupabaseError(waitlistError, "rpc waitlist lookup failed");
+        if (waitlistError) {
+          console.warn("⚠️ RPC waitlist lookup unavailable, using batched fallback:", waitlistError.message);
+        } else {
 
-        const waitlistMap = new Map(
-          (Array.isArray(waitlistRows) ? waitlistRows : []).map((row) => [
-            Number(row.id),
-            {
-              start: row.waitlist_start_at || null,
-              end: row.waitlist_end_at || null,
-              startDay: row.waitlist_start_day ?? null,
-              startTime: normalizeClockTime(row.waitlist_start_time) || null,
-              endDay: row.waitlist_end_day ?? null,
-              endTime: normalizeClockTime(row.waitlist_end_time) || null,
-            },
-          ])
-        );
+          const waitlistMap = new Map(
+            (Array.isArray(waitlistRows) ? waitlistRows : []).map((row) => [
+              Number(row.id),
+              {
+                start: row.waitlist_start_at || null,
+                end: row.waitlist_end_at || null,
+                startDay: row.waitlist_start_day ?? null,
+                startTime: normalizeClockTime(row.waitlist_start_time) || null,
+                endDay: row.waitlist_end_day ?? null,
+                endTime: normalizeClockTime(row.waitlist_end_time) || null,
+              },
+            ])
+          );
 
-        const rpcResult = rpcRows.map((row) => {
-          const location = locationMap.get(Number(row.id)) || null;
-          const waitlistRange = waitlistMap.get(Number(row.id)) || {
-            start: null,
-            end: null,
-            startDay: null,
-            startTime: null,
-            endDay: null,
-            endTime: null,
-          };
-          const waitlistActive = isWaitlistWindowActive({
-            waitlist_start_at: waitlistRange.start,
-            waitlist_end_at: waitlistRange.end,
-            waitlist_start_day: waitlistRange.startDay,
-            waitlist_start_time: waitlistRange.startTime,
-            waitlist_end_day: waitlistRange.endDay,
-            waitlist_end_time: waitlistRange.endTime,
+          const rpcResult = rpcRows.map((row) => {
+            const location = locationMap.get(Number(row.id)) || null;
+            const waitlistRange = waitlistMap.get(Number(row.id)) || {
+              start: null,
+              end: null,
+              startDay: null,
+              startTime: null,
+              endDay: null,
+              endTime: null,
+            };
+            const waitlistActive = isWaitlistWindowActive({
+              waitlist_start_at: waitlistRange.start,
+              waitlist_end_at: waitlistRange.end,
+              waitlist_start_day: waitlistRange.startDay,
+              waitlist_start_time: waitlistRange.startTime,
+              waitlist_end_day: waitlistRange.endDay,
+              waitlist_end_time: waitlistRange.endTime,
+            });
+
+            return {
+              id: row.id,
+              name: row.name,
+              type: row.type,
+              status: row.status,
+              time: row.departure_datetime,
+              mode:
+                row.status !== "open"
+                  ? "closed"
+                  : waitlistActive
+                    ? "waiting"
+                    : row.mode || ((row.confirmed || 0) < (row.capacity || 0) ? "available" : "waiting"),
+              confirmed: row.confirmed || 0,
+              waiting: row.waiting || 0,
+              capacity: row.capacity || 0,
+              start_time: row.start_time ? normalizeClockTime(row.start_time) : (normalizeClockTime(row.first_time) || null),
+              first_time: normalizeClockTime(row.first_time) || null,
+              active_started_at: row.active_started_at || null,
+              last_finished_at: row.last_finished_at || null,
+              waitlist_start_at: waitlistRange.start,
+              waitlist_end_at: waitlistRange.end,
+              waitlist_start_day: waitlistRange.startDay,
+              waitlist_start_time: waitlistRange.startTime,
+              waitlist_end_day: waitlistRange.endDay,
+              waitlist_end_time: waitlistRange.endTime,
+              waitlist_active: waitlistActive,
+              location_active: Boolean(location?.active),
+              location_last_latitude: location?.last_latitude ?? null,
+              location_last_longitude: location?.last_longitude ?? null,
+              location_last_update_at: location?.last_update_at || null,
+              location_last_stop_name: location?.last_stop_name || null,
+              location_last_stop_at: location?.last_stop_at || null,
+              trips_paused: Boolean(systemFlags?.tripsPaused),
+              trips_pause_message: String(systemFlags?.pauseMessage || "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera"),
+            };
           });
 
-          return {
-            id: row.id,
-            name: row.name,
-            type: row.type,
-            status: row.status,
-            time: row.departure_datetime,
-            mode:
-              row.status !== "open"
-                ? "closed"
-                : waitlistActive
-                  ? "waiting"
-                  : row.mode || ((row.confirmed || 0) < (row.capacity || 0) ? "available" : "waiting"),
-            confirmed: row.confirmed || 0,
-            waiting: row.waiting || 0,
-            capacity: row.capacity || 0,
-            start_time: row.start_time ? normalizeClockTime(row.start_time) : (normalizeClockTime(row.first_time) || null),
-            first_time: normalizeClockTime(row.first_time) || null,
-            active_started_at: row.active_started_at || null,
-            last_finished_at: row.last_finished_at || null,
-            waitlist_start_at: waitlistRange.start,
-            waitlist_end_at: waitlistRange.end,
-            waitlist_start_day: waitlistRange.startDay,
-            waitlist_start_time: waitlistRange.startTime,
-            waitlist_end_day: waitlistRange.endDay,
-            waitlist_end_time: waitlistRange.endTime,
-            waitlist_active: waitlistActive,
-            location_active: Boolean(location?.active),
-            location_last_latitude: location?.last_latitude ?? null,
-            location_last_longitude: location?.last_longitude ?? null,
-            location_last_update_at: location?.last_update_at || null,
-            location_last_stop_name: location?.last_stop_name || null,
-            location_last_stop_at: location?.last_stop_at || null,
-            trips_paused: Boolean(systemFlags?.tripsPaused),
-            trips_pause_message: String(systemFlags?.pauseMessage || "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera"),
-          };
-        });
-
-        return sortTrasladosByHora(rpcResult);
+          return sortTrasladosByHora(rpcResult);
+        }
       }
 
       if (rpcError) {
