@@ -3,6 +3,12 @@ const path = require("path");
 const { supabase } = require("../lib/supabaseClient");
 const { memoryCache } = require("../utils/cache");
 
+const dataDir = path.join(__dirname, "..", "..", "data");
+const flagsPath = path.join(dataDir, "system-flags.json");
+const ARGENTINA_TIMEZONE = "America/Argentina/Buenos_Aires";
+const DAY_MS = 24 * 60 * 60 * 1000;
+const FLAGS_ROW_ID = 1;
+
 const DEFAULT_FLAGS = {
   tripsPaused: false,
   pauseMessage: "Traslados pausados, a partir del jueves a las 18hs podras anotarte en lista de espera",
