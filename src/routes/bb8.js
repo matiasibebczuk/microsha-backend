@@ -228,6 +228,9 @@ router.post("/operations/:id/confirm", async (req, res) => {
 
     const tripId = Number(data.result?.tripId);
     const field = data.result?.field;
+    if (Number.isFinite(tripId) && tripId > 0) {
+      invalidateReservationCaches(tripId);
+    }
     let verificationError = null;
     let expectedValue;
     let actualValue;
