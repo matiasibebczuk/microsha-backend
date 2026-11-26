@@ -12,6 +12,11 @@ const {
 const { supabase } = require("../lib/supabaseClient");
 const { queryReadOnly } = require("../services/bb8/readOnlyQueries");
 const { CLUB_ID } = require("../services/bb8/clubAccess");
+const {
+  appendCancellationLog,
+  invalidateReservationCaches,
+  promoteWaitingPassengersIfNeeded,
+} = require("../services/reservationLifecycle");
 
 const router = express.Router();
 const OPERATION_ID_PATTERN =
@@ -84,7 +89,7 @@ router.post("/query", async (req, res) => {
     ) {
       return res.json({
         reply:
-          "Esa modificación todavía no está habilitada y no realicé cambios. Solo puedo preparar cambios de horario, cierre de traslados abiertos y creación de pasajeros; todos requieren revisar y confirmar una vista previa.",
+          "Esa modificación todavía no está habilitada y no realicé cambios. Puedo preparar cambios de horario, cierre de traslados abiertos, altas de pasajeros y bajas individuales de inscripciones; todos requieren revisar y confirmar una vista previa.",
         trips: [],
       });
     }
@@ -203,8 +208,10 @@ router.post("/operations/:id/confirm", async (req, res) => {
         PREVIEW_STALE: "Los datos cambiaron desde la vista previa. Revisá la información y volvé a solicitarla.",
         TRIP_OUTSIDE_CLUB: "No se pudo validar que el traslado pertenezca al club 1926.",
         TRIP_NOT_CANCELLABLE: "El traslado ya no puede cerrarse con esta vista previa.",
-        TRIP_HAS_ACTIVE_RUN: "El traslado ya tiene un recorrido activo y no se puede cerrar.",
+        TRIP_HAS_ACTIVE_RUN: "El traslado ya tiene un recorrido activo y no se puede modificar.",
         TRIP_NOT_EDITABLE: "El traslado ya no está abierto y no se puede modificar con esta vista previa.",
+        RESERVATION_NOT_FOUND: "La inscripción ya no existe o no corresponde a esa persona y traslado.",
+        INVALID_RESERVATION: "La inscripción cambió desde la vista previa. Volvé a solicitar la operación.",
         DUPLICATE_DNI: "Ya existe un usuario con ese DNI. No se creó otro registro.",
         INVALID_USER: "Los datos del pasajero no cumplen los requisitos para crear el usuario.",
       };
@@ -226,8 +233,91 @@ router.post("/operations/:id/confirm", async (req, res) => {
     let actualValue;
     let verified = false;
     let verificationDetails = {};
+    let promotedCount = Number(data.result?.promotedCount) || 0;
+    let postExecutionError = null;
+    let cancellationLogged = data.result?.cancellationLogged === true;
+    let promotionCompleted = data.result?.promotionCompleted === true;
 
-    if (field === "user_created") {
+    if (field === "reservation_removed" && data.result?.verified !== true) {
+      try {
+        invalidateReservationCaches(tripId);
+        if (!cancellationLogged) {
+          await appendCancellationLog({
+            canceled_at: new Date().toISOString(),
+            trip_id: tripId,
+            user_id: data.result?.userId,
+            reservation_id: data.result?.reservationId,
+            status_at_cancel: data.result?.previousValue,
+            user_name: data.result?.userName,
+            description: data.result?.userDescription,
+          });
+          cancellationLogged = true;
+          const { error: logStateError } = await supabase.rpc(
+            "bb8_record_verification",
+            {
+              p_id: operationId,
+              p_actor_id: user.id,
+              p_verified: false,
+              p_details: {
+                cancellationLogged,
+                promotionCompleted,
+                promotedCount,
+              },
+            }
+          );
+          if (logStateError) throw logStateError;
+        }
+        if (!promotionCompleted && data.result?.previousValue === "confirmed") {
+          const promotion = await promoteWaitingPassengersIfNeeded(tripId);
+          promotedCount = promotion.promotedCount || 0;
+        }
+        promotionCompleted = true;
+        const { error: promotionStateError } = await supabase.rpc(
+          "bb8_record_verification",
+          {
+            p_id: operationId,
+            p_actor_id: user.id,
+            p_verified: false,
+            p_details: {
+              cancellationLogged,
+              promotionCompleted,
+              promotedCount,
+            },
+          }
+        );
+        if (promotionStateError) throw promotionStateError;
+      } catch (error) {
+        postExecutionError = error;
+        console.error("[BB8] Reservation removal follow-up failed", {
+          operationId,
+          code: error?.code || "RESERVATION_FOLLOW_UP_FAILED",
+          message: error?.message || "unknown",
+        });
+      } finally {
+        invalidateReservationCaches(tripId);
+      }
+    }
+
+    if (field === "reservation_removed") {
+      const { data: reservation, error: reservationError } = await supabase
+        .from("reservations")
+        .select("id")
+        .eq("id", data.result?.reservationId)
+        .maybeSingle();
+      verificationError = reservationError || postExecutionError;
+      expectedValue = "removed";
+      actualValue = reservation ? "present" : "removed";
+      verified = Boolean(!verificationError && !reservation);
+      verificationDetails = {
+        tripId,
+        reservationId: data.result?.reservationId,
+        expectedValue,
+        actualValue,
+        cancellationLogged,
+        promotionCompleted,
+        promotedCount,
+      };
+    } else if (field === "user_created") {
       expectedValue = {
         name: data.result?.name,
         dni: data.result?.dni,
@@ -319,13 +409,35 @@ router.post("/operations/:id/confirm", async (req, res) => {
     }
 
     const auditRecorded = !verificationWriteError;
+    const retryable =
+      field === "reservation_removed" &&
+      (Boolean(postExecutionError) ||
+        Boolean(verificationError) ||
+        (verified && !auditRecorded));
+    const responseResult =
+      field === "reservation_removed"
+        ? Object.fromEntries(
+            Object.entries({
+              ...(data.result || {}),
+              cancellationLogged,
+              promotionCompleted,
+              promotedCount,
+            }).filter(
+              ([key]) => key !== "userDescription"
+            )
+          )
+        : data.result;
     return res.status(verified && auditRecorded ? 200 : 502).json({
       reply:
         verified && auditRecorded
-          ? "Operación completada y verificada."
+          ? field === "reservation_removed"
+            ? `Inscripción de ${data.result?.userName || "la persona"} dada de baja y verificada.${promotedCount > 0 ? ` Se promovieron ${promotedCount} personas de la lista de espera.` : ""}`
+            : "Operación completada y verificada."
           : verified
             ? "La operación se ejecutó y verificó, pero no se pudo guardar la verificación en la auditoría."
-            : "La operación se ejecutó, pero no se pudo verificar el resultado. Revisá el estado antes de repetirla.",
+          : field === "reservation_removed" && retryable
+              ? "La inscripción se eliminó, pero no se completó toda la auditoría o actualización de lista de espera. Reintentá la finalización antes de solicitar otra baja."
+              : "La operación se ejecutó, pero no se pudo verificar el resultado. Revisá el estado antes de repetirla.",
       code: verified
         ? auditRecorded
           ? null
@@ -335,8 +447,9 @@ router.post("/operations/:id/confirm", async (req, res) => {
       operation,
       executed: true,
       verified,
+      retryable,
       auditRecorded,
-      result: data.result,
+      result: responseResult,
     });
   } catch (error) {
     const status = Number(error?.status) || 500;

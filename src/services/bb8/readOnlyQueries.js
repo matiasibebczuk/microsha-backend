@@ -326,6 +326,47 @@ async function findClubPassengers(query) {
   return { matches: [...unique.values()] };
 }
 
+async function findClubPassengersByExactName(name) {
+  const search = String(name || "").trim();
+  if (!search) return { matches: [] };
+  const pattern = search.replace(/[\\%_]/g, "\\$&");
+  const selectFields = "id, name, role, group_number, organization_id";
+  const groupResults = await Promise.all([
+    supabase
+      .from("users")
+      .select(selectFields)
+      .eq("role", "pasajero")
+      .eq("group_number", CLUB_ID)
+      .ilike("name", pattern)
+      .limit(50),
+    supabase
+      .from("users")
+      .select(selectFields)
+      .eq("role", "pasajero")
+      .eq("organization_id", CLUB_ID)
+      .ilike("name", pattern)
+      .limit(50),
+  ]);
+
+  const error = groupResults.find((result) => result.error)?.error;
+  if (error) {
+    throw createBb8Error(
+      "No se pudo validar la identidad del pasajero del club 1926.",
+      502,
+      "USER_QUERY_FAILED",
+      "users"
+    );
+  }
+
+  const unique = new Map();
+  for (const result of groupResults) {
+    for (const user of result.data || []) {
+      unique.set(String(user.id), user);
+    }
+  }
+  return { matches: [...unique.values()] };
+}
+
 async function queryPerson(query, history = false) {
   const missingTarget = requireQuotedTarget(query, "person");
   if (missingTarget) return missingTarget;
@@ -491,5 +532,7 @@ async function queryReadOnly(intent, entityName, message) {
 }
 
 module.exports = {
+  findClubPassengers,
+  findClubPassengersByExactName,
   queryReadOnly,
 };

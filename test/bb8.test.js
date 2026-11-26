@@ -13,6 +13,7 @@ const {
 } = require("../src/services/bb8/mutationPlanner");
 const { queryReadOnly } = require("../src/services/bb8/readOnlyQueries");
 const { supabase } = require("../src/lib/supabaseClient");
+const { invalidateReservationCaches } = require("../src/services/reservationLifecycle");
 
 const originalFetch = global.fetch;
 const originalApiKey = process.env.OPENAI_API_KEY;
@@ -136,6 +137,152 @@ test("passenger creation requires both surname and given name", async () => {
 
   assert.equal(result.kind, "clarification");
   assert.match(result.reply, /apellido y nombre/);
+});
+
+function stubPassengerRemovalQueries({ passengers, reservation, status = "open", activeRun = null }) {
+  const trip = {
+    id: 9201,
+    name: "Ruta norte",
+    type: "ida",
+    status,
+    departure_datetime: "2026-12-01T10:00:00Z",
+    start_time: "10:00",
+  };
+  invalidateReservationCaches(trip.id);
+
+  supabase.from = (table) => {
+    const query = {
+      filters: [],
+      select() {
+        return this;
+      },
+      eq(field, value) {
+        this.filters.push([field, value]);
+        return this;
+      },
+      in(field, value) {
+        this.filters.push([field, value]);
+        return this;
+      },
+      ilike(field, value) {
+        this.filters.push([field, value]);
+        return this;
+      },
+      is(field, value) {
+        this.filters.push([field, value]);
+        return this;
+      },
+      order() {
+        return this;
+      },
+      limit() {
+        return this;
+      },
+      values() {
+        if (table === "trip_groups") return [{ trip_id: trip.id }];
+        if (table === "trips") return [trip];
+        if (table === "trip_runs") return activeRun ? [activeRun] : [];
+        if (table === "users") return passengers;
+        if (table === "reservations") return reservation ? [reservation] : [];
+        return [];
+      },
+      maybeSingle() {
+        return Promise.resolve({ data: this.values()[0] || null, error: null });
+      },
+      then(resolve, reject) {
+        return Promise.resolve({ data: this.values(), error: null }).then(resolve, reject);
+      },
+    };
+    return query;
+  };
+  return trip;
+}
+
+test("individual passenger removal creates a single-reservation preview", async () => {
+  const passenger = {
+    id: 42,
+    name: "Gómez José",
+    role: "pasajero",
+    group_number: 1926,
+  };
+  const trip = stubPassengerRemovalQueries({
+    passengers: [passenger],
+    reservation: {
+      id: 501,
+      trip_id: 9201,
+      user_id: 42,
+      status: "confirmed",
+    },
+  });
+
+  const result = await prepareMutation(
+    'Dar de baja a "Gómez José" del traslado "Ruta norte"'
+  );
+
+  assert.equal(result.kind, "preview");
+  assert.deepEqual(result.action, {
+    type: "reservation_cancel",
+    trip_id: trip.id,
+    reservation_id: 501,
+    user_id: 42,
+    expected_status: "confirmed",
+  });
+  assert.match(result.preview.action, /lista de espera/);
+});
+
+test("individual passenger removal refuses ambiguous names", async () => {
+  stubPassengerRemovalQueries({
+    passengers: [
+      { id: 42, name: "Gómez José" },
+      { id: 43, name: "Gómez José" },
+    ],
+    reservation: null,
+  });
+
+  const result = await prepareMutation(
+    'Eliminar a "Gómez José" del traslado "Ruta norte"'
+  );
+
+  assert.equal(result.kind, "clarification");
+  assert.match(result.reply, /varios pasajeros/);
+});
+
+test("individual passenger removal refuses a trip with an active run", async () => {
+  stubPassengerRemovalQueries({
+    passengers: [{ id: 42, name: "Gómez José" }],
+    reservation: { id: 501, trip_id: 9201, user_id: 42, status: "confirmed" },
+    activeRun: { id: 99 },
+  });
+
+  const result = await prepareMutation(
+    'Dar de baja a "Gómez José" del traslado "Ruta norte"'
+  );
+
+  assert.equal(result.kind, "clarification");
+  assert.match(result.reply, /recorrido activo/);
+});
+
+test("individual passenger removal refuses a closed trip or missing reservation", async () => {
+  stubPassengerRemovalQueries({
+    passengers: [{ id: 42, name: "Gómez José" }],
+    reservation: null,
+    status: "closed",
+  });
+  const closedTripResult = await prepareMutation(
+    'Dar de baja a "Gómez José" del traslado "Ruta norte"'
+  );
+  assert.equal(closedTripResult.kind, "clarification");
+  assert.match(closedTripResult.reply, /traslado está abierto/);
+
+  stubPassengerRemovalQueries({
+    passengers: [{ id: 42, name: "Gómez José" }],
+    reservation: null,
+  });
+  const missingReservationResult = await prepareMutation(
+    'Dar de baja a "Gómez José" del traslado "Ruta norte"'
+  );
+  assert.equal(missingReservationResult.kind, "clarification");
+  assert.match(missingReservationResult.reply, /no tiene una inscripción activa/);
 });
 
 test("read-only trip queries resolve targets only from club 1926 links", async () => {

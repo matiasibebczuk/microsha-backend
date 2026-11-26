@@ -90,7 +90,11 @@ begin
     return jsonb_build_object('ok', true, 'status', 'pending');
   end if;
 
-  if p_action->>'type' not in ('trip_set_start_time', 'trip_cancel') then
+  if p_action->>'type' not in (
+    'trip_set_start_time',
+    'trip_cancel',
+    'reservation_cancel'
+  ) then
     return jsonb_build_object('ok', false, 'code', 'UNSUPPORTED_OPERATION');
   end if;
 
@@ -110,6 +114,24 @@ begin
     return jsonb_build_object('ok', false, 'code', 'TRIP_OUTSIDE_CLUB');
   end if;
 
+  if p_action->>'type' = 'reservation_cancel'
+     and not exists (
+       select 1 from public.trips
+        where id = v_trip_id
+          and status = 'open'
+     ) then
+    return jsonb_build_object('ok', false, 'code', 'TRIP_NOT_EDITABLE');
+  end if;
+
+  if p_action->>'type' = 'reservation_cancel'
+     and exists (
+       select 1 from public.trip_runs
+        where trip_id = v_trip_id
+          and finished_at is null
+     ) then
+    return jsonb_build_object('ok', false, 'code', 'TRIP_HAS_ACTIVE_RUN');
+  end if;
+
   if p_action->>'type' = 'trip_set_start_time'
      and (
        coalesce(p_action->>'new_start_time', '') !~ '^(?:[01][0-9]|2[0-3]):[0-5][0-9]$'
@@ -124,6 +146,30 @@ begin
        or p_action->>'new_status' is distinct from 'closed'
      ) then
     return jsonb_build_object('ok', false, 'code', 'INVALID_TRIP_STATUS');
+  end if;
+
+  if p_action->>'type' = 'reservation_cancel'
+     and (
+       coalesce(p_action->>'reservation_id', '') !~ '^\d+$'
+       or coalesce(p_action->>'user_id', '') = ''
+       or p_action->>'expected_status' is null
+       or p_action->>'expected_status' not in ('confirmed', 'waiting')
+       or not exists (
+         select 1
+           from public.reservations r
+           join public.users u on u.id = r.user_id
+          where r.id::text = p_action->>'reservation_id'
+            and r.trip_id = v_trip_id
+            and r.user_id::text = p_action->>'user_id'
+            and r.status = p_action->>'expected_status'
+            and u.role = 'pasajero'
+            and (
+              u.group_number::text = '1926'
+              or u.organization_id::text = '1926'
+            )
+       )
+     ) then
+    return jsonb_build_object('ok', false, 'code', 'INVALID_RESERVATION');
   end if;
 
   insert into public.bb8_operations (
@@ -248,6 +294,11 @@ declare
   v_user public.users%rowtype;
   v_new_start_time text;
   v_dni text;
+  v_reservation_id bigint;
+  v_reservation_status text;
+  v_reservation_user_id text;
+  v_user_name text;
+  v_user_description text;
   v_result jsonb;
 begin
   select *
@@ -316,7 +367,11 @@ begin
       'field', 'user_created'
     );
   else
-    if v_operation.action->>'type' not in ('trip_set_start_time', 'trip_cancel') then
+    if v_operation.action->>'type' not in (
+      'trip_set_start_time',
+      'trip_cancel',
+      'reservation_cancel'
+    ) then
       return jsonb_build_object('ok', false, 'code', 'UNSUPPORTED_OPERATION');
     end if;
 
@@ -355,7 +410,7 @@ begin
         'previousValue', v_trip.start_time,
         'value', v_new_start_time
       );
-    else
+    elsif v_operation.action->>'type' = 'trip_cancel' then
       if v_trip.status is distinct from v_operation.action->>'expected_status' then
         return public.bb8_fail_operation(p_id, p_actor_id, 'PREVIEW_STALE');
       end if;
@@ -380,6 +435,59 @@ begin
         'field', 'status',
         'previousValue', v_trip.status,
         'value', 'closed'
+      );
+    else
+      begin
+        v_reservation_id := (v_operation.action->>'reservation_id')::bigint;
+      exception when others then
+        return public.bb8_fail_operation(p_id, p_actor_id, 'INVALID_RESERVATION');
+      end;
+
+      select r.status, r.user_id::text, u.name, u.description
+        into v_reservation_status, v_reservation_user_id, v_user_name, v_user_description
+        from public.reservations r
+        join public.users u on u.id = r.user_id
+       where r.id = v_reservation_id
+         and r.trip_id = v_trip_id
+         and u.role = 'pasajero'
+         and (
+           u.group_number::text = '1926'
+           or u.organization_id::text = '1926'
+         )
+       for update of r;
+
+      if not found
+         or v_reservation_user_id is distinct from v_operation.action->>'user_id' then
+        return public.bb8_fail_operation(p_id, p_actor_id, 'RESERVATION_NOT_FOUND');
+      end if;
+      if v_trip.status is distinct from 'open' then
+        return public.bb8_fail_operation(p_id, p_actor_id, 'TRIP_NOT_EDITABLE');
+      end if;
+      if exists (
+        select 1 from public.trip_runs
+         where trip_id = v_trip_id
+           and finished_at is null
+      ) then
+        return public.bb8_fail_operation(p_id, p_actor_id, 'TRIP_HAS_ACTIVE_RUN');
+      end if;
+      if v_reservation_status is distinct from v_operation.action->>'expected_status'
+         or v_reservation_status not in ('confirmed', 'waiting') then
+        return public.bb8_fail_operation(p_id, p_actor_id, 'PREVIEW_STALE');
+      end if;
+
+      delete from public.reservations
+       where id = v_reservation_id;
+
+      v_result := jsonb_build_object(
+        'tripId', v_trip_id,
+        'tripName', v_trip.name,
+        'reservationId', v_reservation_id,
+        'userId', v_reservation_user_id,
+        'userName', v_user_name,
+        'userDescription', coalesce(v_user_description, ''),
+        'field', 'reservation_removed',
+        'previousValue', v_reservation_status,
+        'value', 'removed'
       );
     end if;
   end if;
@@ -432,6 +540,14 @@ begin
   update public.bb8_operations
      set verification_success = p_verified,
          result = coalesce(result, '{}'::jsonb) ||
+           case
+             when result->>'field' = 'reservation_removed'
+               then coalesce(
+                 p_details - 'verified',
+                 '{}'::jsonb
+               )
+             else '{}'::jsonb
+           end ||
            jsonb_build_object('verified', p_verified)
    where id = p_id
      and actor_id = p_actor_id

@@ -2,6 +2,8 @@ const crypto = require("node:crypto");
 const { supabase } = require("../../lib/supabaseClient");
 const { CLUB_ID } = require("./clubAccess");
 const { createBb8Error } = require("./errors");
+const { findClubPassengersByExactName } = require("./readOnlyQueries");
+const { getTripStatus, invalidateReservationCaches } = require("../reservationLifecycle");
 
 const PREVIEW_TTL_MS = 5 * 60 * 1000;
 const TIME_CHANGE_PATTERN =
@@ -10,8 +12,10 @@ const CANCEL_TRIP_PATTERN =
   /^(?:cancela|cancelar|cierra|cerrar)\s+(?:el\s+)?traslado\s+["“]([^"”]+)["”]$/i;
 const CREATE_PASSENGER_PATTERN =
   /^crear\s+(?:un\s+)?(?:usuario|pasajero)\s+["“]([^"”]{3,100})["”]\s+(?:dni\s*)[:#]?\s*(\d{7,9})\s+(?:socio|n[uú]mero\s+de\s+socio|nro\s+de\s+socio)\s*[:#]?\s*(0|\d{6})$/iu;
+const REMOVE_PASSENGER_PATTERN =
+  /^(?:elimina|eliminar|quita|quitar|da\s+de\s+baja|dar\s+de\s+baja)\s+(?:a\s+)?["“]([^"”]{3,100})["”]\s+(?:del|de\s+el)\s+traslado\s+["“]([^"”]{1,100})["”]$/i;
 const MUTATION_VERB_PATTERN =
-  /\b(cambia|cambiar|cambie|modifica|modificar|modifique|actualiza|actualizar|edita|editar|elimina|eliminar|borra|borrar|cancela|cancelar|crea|crear|agrega|agregar|quita|quitar|inscribe|inscribir|anota|anotar|marca|marcar|envia|enviar|activa|activar|desactiva|desactivar|habilita|habilitar|pausa|pausar|reactiva|reactivar|cierra|cerrar)\b/i;
+  /\b(cambia|cambiar|cambie|modifica|modificar|modifique|actualiza|actualizar|edita|editar|elimina|eliminar|borra|borrar|cancela|cancelar|crea|crear|agrega|agregar|quita|quitar|inscribe|inscribir|anota|anotar|marca|marcar|envia|enviar|activa|activar|desactiva|desactivar|habilita|habilitar|pausa|pausar|reactiva|reactivar|cierra|cerrar|da|dar|baja)\b/i;
 
 function isValidClockTime(value) {
   const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
@@ -81,7 +85,6 @@ async function findClubTripByExactName(name) {
     ),
   };
 }
-
 async function buildTripOperation(actionType, match) {
   const { matches } = await findClubTripByExactName(match[1]);
   if (matches.length === 0) {
@@ -156,6 +159,104 @@ async function buildTripOperation(actionType, match) {
   };
 }
 
+async function buildPassengerRemoval(match) {
+  const { matches: tripMatches } = await findClubTripByExactName(match[2]);
+  if (tripMatches.length === 0) {
+    return {
+      kind: "clarification",
+      reply: "No encontré ese traslado dentro del club 1926. Indicá el nombre exacto entre comillas.",
+    };
+  }
+  if (tripMatches.length > 1) {
+    return {
+      kind: "clarification",
+      reply: "Hay varios traslados con ese nombre. Necesito identificar un traslado único antes de dar de baja la inscripción.",
+    };
+  }
+
+  const trip = tripMatches[0];
+  if (trip.status !== "open") {
+    return {
+      kind: "clarification",
+      reply: "Solo puedo dar de baja una inscripción mientras el traslado está abierto.",
+    };
+  }
+  invalidateReservationCaches(trip.id);
+  const tripStatus = await getTripStatus(trip.id);
+  if (tripStatus?.hasActiveRun) {
+    return {
+      kind: "clarification",
+      reply: "Ese traslado ya tiene un recorrido activo y no se puede dar de baja una inscripción.",
+    };
+  }
+
+  const { matches: passengerMatches } = await findClubPassengersByExactName(
+    match[1]
+  );
+  const expectedName = normalizeName(match[1]);
+  const exactPassengers = passengerMatches.filter(
+    (passenger) => normalizeName(passenger.name) === expectedName
+  );
+  if (exactPassengers.length === 0) {
+    return {
+      kind: "clarification",
+      reply: "No encontré esa persona como pasajero del club 1926. Indicá el nombre y apellido tal como figuran en el registro.",
+    };
+  }
+  if (exactPassengers.length > 1) {
+    return {
+      kind: "clarification",
+      reply: "Hay varios pasajeros con ese nombre. Necesito un dato que los distinga antes de dar de baja una inscripción.",
+    };
+  }
+
+  const passenger = exactPassengers[0];
+  const { data: reservation, error } = await supabase
+    .from("reservations")
+    .select("id, trip_id, user_id, status, stop_id, stops(name)")
+    .eq("trip_id", trip.id)
+    .eq("user_id", passenger.id)
+    .in("status", ["confirmed", "waiting"])
+    .maybeSingle();
+
+  if (error) {
+    throw createBb8Error(
+      "No se pudo validar la inscripción de esa persona.",
+      502,
+      "RESERVATION_QUERY_FAILED",
+      "reservations"
+    );
+  }
+  if (!reservation) {
+    return {
+      kind: "clarification",
+      reply: `${passenger.name} no tiene una inscripción activa en ${trip.name}.`,
+    };
+  }
+
+  const statusLabel =
+    reservation.status === "confirmed" ? "Confirmada" : "En lista de espera";
+  return {
+    kind: "preview",
+    action: {
+      type: "reservation_cancel",
+      trip_id: trip.id,
+      reservation_id: reservation.id,
+      user_id: passenger.id,
+      expected_status: reservation.status,
+    },
+    preview: {
+      title: "Dar de baja una inscripción",
+      tripId: trip.id,
+      tripName: trip.name,
+      departureDate: trip.departure_datetime,
+      currentValue: statusLabel,
+      newValue: "Inscripción eliminada",
+      action: `Dar de baja a ${passenger.name} del traslado. Si corresponde, la lista de espera se actualizará según las reglas vigentes.`,
+    },
+  };
+}
+
 async function prepareMutation(message) {
   const createPassengerMatch = message.match(CREATE_PASSENGER_PATTERN);
   if (createPassengerMatch) {
@@ -210,11 +311,16 @@ async function prepareMutation(message) {
     return buildTripOperation("trip_cancel", cancelMatch);
   }
 
+  const removePassengerMatch = message.match(REMOVE_PASSENGER_PATTERN);
+  if (removePassengerMatch) {
+    return buildPassengerRemoval(removePassengerMatch);
+  }
+
   if (MUTATION_VERB_PATTERN.test(message)) {
     return {
       kind: "unsupported",
       reply:
-        "Todavía no puedo preparar esa modificación con seguridad. No realicé cambios. Para horarios, usá: `Cambiar el horario del traslado \"Nombre exacto\" a 10:30`. Para cerrar: `Cancelar el traslado \"Nombre exacto\"`. Para crear un pasajero: `Crear usuario \"Apellido Nombre\" DNI 12345678 socio 123456`.",
+        "Todavía no puedo preparar esa modificación con seguridad. No realicé cambios. Para horarios, usá: `Cambiar el horario del traslado \"Nombre exacto\" a 10:30`. Para cerrar: `Cancelar el traslado \"Nombre exacto\"`. Para crear un pasajero: `Crear usuario \"Apellido Nombre\" DNI 12345678 socio 123456`. Para una baja: `Dar de baja a \"Apellido Nombre\" del traslado \"Nombre exacto\"`.",
     };
   }
 
