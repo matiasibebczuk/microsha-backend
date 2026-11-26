@@ -12,6 +12,7 @@ const adminRoutes = require("./routes/admin");
 const meRoutes = require("./routes/me");
 const templatesRoutes = require("./routes/templates");
 const groupsRoutes = require("./routes/groups");
+const bb8Routes = require("./routes/bb8");
 const { initAllSchedulers } = require("./cron");
 
 
@@ -69,6 +70,7 @@ app.use("/admin", adminRoutes);
 app.use("/me", meRoutes);
 app.use("/templates", templatesRoutes);
 app.use("/groups", groupsRoutes);
+app.use("/bb8", bb8Routes);
 
 // Global error handler ensuring JSON response and proper CORS handling
 app.use((err, req, res, next) => {
